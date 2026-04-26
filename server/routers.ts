@@ -4,7 +4,13 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { invokeLLM } from "./_core/llm";
 import { notifyOwner } from "./_core/notification";
-import { createBrief, getBriefsByUserId, getBriefById, createVideoJob, getVideoJobsByBriefId, getVideoJobById, updateVideoJob, getVideoJobByBriefAndSegment, createStitchJob, getStitchJobById, getStitchJobByBriefId, updateStitchJob } from "./db";
+import {
+  createBrief, getBriefsByUserId, getBriefById,
+  createVideoJob, getVideoJobsByBriefId, getVideoJobById, updateVideoJob,
+  getVideoJobByBriefAndSegment, deleteVideoJob,
+  createStitchJob, getStitchJobById, getStitchJobByBriefId, updateStitchJob, deleteStitchJob,
+  getVideoSummaryByBriefIds, getStitchSummaryByBriefIds,
+} from "./db";
 import { submitVideoTask, getVideoTaskResult } from "./wavespeed";
 import { buildStitchEdit, submitShotstackRender, getShotstackRenderStatus } from "./shotstack";
 import { storagePut } from "./storage";
@@ -19,10 +25,18 @@ const SEEDANCE_SYSTEM_PROMPT = [
   "3. NEVER use the word \"cinematic\" anywhere. These are UGC ads that look like iPhone footage.",
   "4. Every output MUST include Pinterest links. Never skip them.",
   "5. Do NOT ask clarifying questions. Make creative decisions yourself.",
+  "6. STRICTLY produce the EXACT number of segments requested. If the user says 3 segments, output EXACTLY 3 segments — no more, no fewer. Adapt the script to fit the requested segment count by combining or splitting content as needed.",
   "",
   "ANTI-CINEMATIC RULES (NON-NEGOTIABLE):",
   "ALWAYS use: iPhone handheld, natural lighting / window light, UGC style, slight camera shake, casual, authentic, 9:16",
   "NEVER use: cinematic, camera brands (ARRI, RED, Blackmagic), anamorphic, film grain, dramatic lighting, speed ramp, bloom flash, lens flare, whip pan, crane, dolly, steadicam, gimbal, Dutch angle, color grade, LUT, bokeh, epic, breathtaking, stunning, slow motion (unless \"iPhone slow-mo\"), depth of field alone (say \"phone camera depth of field\")",
+  "",
+  "CREATOR CONSISTENCY (CRITICAL):",
+  "You MUST define ONE detailed creator persona at the start of the brief. This EXACT same person appears in EVERY segment.",
+  "Include: approximate age, ethnicity, hair color/style, build, clothing style.",
+  "Every segment prompt MUST begin with the SAME creator description so Seedance generates a visually consistent person.",
+  "Example: \"A 28-year-old woman with shoulder-length dark brown hair, light olive skin, wearing a cream oversized hoodie\"",
+  "This description MUST be repeated verbatim at the start of every segment prompt inside the code block.",
   "",
   "DETAIL LEVEL:",
   "Be VERY descriptive. Every 5-second block needs 3-4 sentences of specific detail:",
@@ -49,11 +63,6 @@ const SEEDANCE_SYSTEM_PROMPT = [
   "https://www.pinterest.com/search/pins/?q=WORDS+SEPARATED+BY+PLUS+SIGNS",
   "Make searches specific: combine person demographic + action + setting.",
   "",
-  "REFERENCE IMAGE MAPPING:",
-  "@Image1 = creator from Pinterest (same across ALL segments)",
-  "@Image2 = setting reference if needed",
-  "@Image3 = product photo (user provides this)",
-  "",
   "SEEDANCE 2.0 FACTS:",
   "- Input: up to 9 images + 3 videos + 3 audio (12 total)",
   "- Output: 4-15 seconds per generation, up to 2K, 9:16 for UGC",
@@ -73,6 +82,7 @@ function buildUserPrompt(data: {
   scriptConcept: string;
   imageAnalysis?: string | null;
 }) {
+  const totalDuration = data.segmentCount * 15;
   const lines = [
     "Create a complete UGC ad director's brief for the following product and campaign:",
     "",
@@ -81,8 +91,10 @@ function buildUserPrompt(data: {
     "**Target Audience:** " + data.targetAudienceAge + ", " + data.targetAudienceGender + ", " + data.targetAudienceLifestyle,
     "**Ad Goal:** " + data.adGoal,
     "**Tone/Vibe:** " + data.toneVibe,
-    "**Number of Segments:** " + data.segmentCount + " (each 15 seconds)",
+    "**Number of Segments:** EXACTLY " + data.segmentCount + " (each 15 seconds, " + totalDuration + "s total)",
     "**Script/Concept:** " + data.scriptConcept,
+    "",
+    "CRITICAL: You MUST produce EXACTLY " + data.segmentCount + " segments. Not " + (data.segmentCount + 1) + ", not " + (data.segmentCount - 1) + ". EXACTLY " + data.segmentCount + ". If the script has more sections than " + data.segmentCount + ", combine them. If it has fewer, split them.",
   ];
 
   if (data.imageAnalysis) {
@@ -96,8 +108,9 @@ function buildUserPrompt(data: {
     "# Your UGC Ad — Director's Brief",
     "",
     "**Product:** [name]",
-    "**Duration:** [total]s (" + data.segmentCount + " segments x 15s)",
-    "**Ad Structure:** Hook → Problem/Proof → Benefit/Demo → CTA (adapt based on segment count)",
+    "**Duration:** " + totalDuration + "s (" + data.segmentCount + " segments x 15s)",
+    "**Creator Persona:** [DETAILED description — age, ethnicity, hair, build, clothing. This EXACT person appears in every segment.]",
+    "**Ad Structure:** Hook > Problem/Proof > Benefit/Demo > CTA (adapt based on segment count)",
     "",
     "---",
     "",
@@ -127,14 +140,18 @@ function buildUserPrompt(data: {
     "",
     "Upload your Pinterest creator as @Image1 and your product photo as @Image3 for EVERY segment.",
     "",
-    "(For each segment, output in this EXACT format:)",
+    "IMPORTANT: Each segment prompt MUST start with the EXACT same creator description (from Creator Persona above) to maintain visual consistency across all segments.",
     "",
-    "### Segment N of " + data.segmentCount + " — [Section Name] (timestamp)",
+    "(Output EXACTLY " + data.segmentCount + " segments in this format:)",
+    "",
+    "### Segment N of " + data.segmentCount + " — [Section Name] (0:00-0:15)",
     "",
     "**What's happening:** [One sentence]",
     "",
     "```",
     "9:16. 15 seconds. Single continuous shot. UGC style. iPhone handheld.",
+    "",
+    "[CREATOR PERSONA DESCRIPTION — repeated verbatim from above]",
     "",
     "@Image1 is the creator. @Image3 is the product.",
     "",
@@ -202,10 +219,44 @@ export const appRouter = router({
           ],
         });
 
-        const generatedBrief =
+        let generatedBrief =
           typeof llmResponse.choices[0]?.message?.content === "string"
             ? llmResponse.choices[0].message.content
             : "";
+
+        // Post-process: enforce segment count matches request
+        const segmentHeaders = generatedBrief.match(/### Segment \d+ of \d+/g) || [];
+        if (segmentHeaders.length > input.segmentCount) {
+          console.warn("[Brief] LLM generated " + segmentHeaders.length + " segments but " + input.segmentCount + " were requested. Truncating extra segments.");
+          // Find the start of the (N+1)th segment and truncate everything after it
+          const segmentPattern = /### Segment \d+ of \d+/g;
+          let matchResult;
+          let matchCount = 0;
+          let truncateIndex = -1;
+          while ((matchResult = segmentPattern.exec(generatedBrief)) !== null) {
+            matchCount++;
+            if (matchCount === input.segmentCount + 1) {
+              truncateIndex = matchResult.index;
+              break;
+            }
+          }
+          if (truncateIndex > 0) {
+            // Find the previous section divider (---) before the extra segment
+            const beforeExtra = generatedBrief.substring(0, truncateIndex);
+            const lastDivider = beforeExtra.lastIndexOf("---");
+            if (lastDivider > 0) {
+              generatedBrief = generatedBrief.substring(0, lastDivider).trimEnd();
+            } else {
+              generatedBrief = beforeExtra.trimEnd();
+            }
+            // Re-append the Step 4 review section if it was cut off
+            if (!generatedBrief.includes("## Step 4")) {
+              generatedBrief += "\n\n---\n\n## Step 4: Generate & Review\n\n1. Generate all segments in Seedance 2.0\n2. Check: Does the creator look consistent across segments?\n3. Check: Does it look like a real person filmed this on their phone?\n4. If anything looks off, regenerate that segment with the same @Image1\n5. Stitch segments in order and export";
+            }
+          }
+        } else if (segmentHeaders.length < input.segmentCount && segmentHeaders.length > 0) {
+          console.warn("[Brief] LLM generated " + segmentHeaders.length + " segments but " + input.segmentCount + " were requested. Brief may have fewer segments than expected.");
+        }
 
         // Extract pinterest links from the generated brief
         const pinterestRegex = /https:\/\/www\.pinterest\.com\/search\/pins\/\?q=[^\s)"\]]+/g;
@@ -240,7 +291,7 @@ export const appRouter = router({
     analyzeImage: protectedProcedure
       .input(
         z.object({
-          imageUrl: z.string().min(1),
+          imageUrl: z.string(),
         })
       )
       .mutation(async ({ input }) => {
@@ -310,6 +361,38 @@ export const appRouter = router({
       return getBriefsByUserId(ctx.user.id);
     }),
 
+    /** Enhanced list with video and stitch summaries */
+    listWithStatus: protectedProcedure.query(async ({ ctx }) => {
+      const briefList = await getBriefsByUserId(ctx.user.id);
+      if (briefList.length === 0) return [];
+
+      const briefIds = briefList.map((b) => b.id);
+      const [videoSummaries, stitchSummaries] = await Promise.all([
+        getVideoSummaryByBriefIds(briefIds),
+        getStitchSummaryByBriefIds(briefIds),
+      ]);
+
+      const videoMap = new Map(videoSummaries.map((v) => [v.briefId, v]));
+      const stitchMap = new Map(stitchSummaries.map((s) => [s.briefId, s]));
+
+      return briefList.map((b) => {
+        const vs = videoMap.get(b.id);
+        const ss = stitchMap.get(b.id);
+        return {
+          ...b,
+          videoStatus: vs ? {
+            total: Number(vs.totalJobs),
+            completed: Number(vs.completedJobs),
+            failed: Number(vs.failedJobs),
+          } : null,
+          stitchStatus: ss ? {
+            status: ss.status,
+            finalVideoUrl: ss.finalVideoUrl,
+          } : null,
+        };
+      });
+    }),
+
     getById: protectedProcedure
       .input(z.object({ id: z.number() }))
       .query(async ({ input, ctx }) => {
@@ -328,6 +411,7 @@ export const appRouter = router({
           briefId: z.number(),
           segmentIndex: z.number().min(0).max(3),
           prompt: z.string().min(1),
+          segmentName: z.string().optional(),
           referenceImages: z.array(z.string()).optional(),
           duration: z.number().min(4).max(15).optional(),
         })
@@ -339,11 +423,18 @@ export const appRouter = router({
           return { jobId: existing.id, status: existing.status, message: "Video generation already in progress" };
         }
 
+        // If there's a failed or completed job, delete it so we can create a fresh one
+        if (existing) {
+          await deleteVideoJob(existing.id);
+        }
+
         // Verify the brief belongs to the user
         const brief = await getBriefById(input.briefId);
         if (!brief || brief.userId !== ctx.user.id) {
           throw new Error("Brief not found or access denied");
         }
+
+        const dur = input.duration || 15;
 
         // Create the video job record
         const jobId = await createVideoJob({
@@ -354,18 +445,20 @@ export const appRouter = router({
           status: "pending",
           aspectRatio: "9:16",
           resolution: "720p",
-          duration: input.duration || 15,
+          duration: dur,
         });
 
         // Submit to WaveSpeed API
         try {
+          console.log("[WaveSpeed] Submitting task: duration=" + dur + ", segmentIndex=" + input.segmentIndex + ", briefId=" + input.briefId);
           const result = await submitVideoTask({
             prompt: input.prompt,
             aspectRatio: "9:16",
             resolution: "720p",
-            duration: input.duration || 15,
+            duration: dur,
             referenceImages: input.referenceImages,
           });
+          console.log("[WaveSpeed] Task submitted: id=" + result.data.id);
 
           await updateVideoJob(jobId, {
             wavespeedTaskId: result.data.id,
@@ -375,6 +468,7 @@ export const appRouter = router({
           return { jobId, status: "created", wavespeedTaskId: result.data.id };
         } catch (err: unknown) {
           const errMsg = err instanceof Error ? err.message : "Unknown error";
+          console.error("[WaveSpeed] Submit failed:", errMsg);
           await updateVideoJob(jobId, {
             status: "failed",
             errorMessage: errMsg,
@@ -391,6 +485,7 @@ export const appRouter = router({
             z.object({
               segmentIndex: z.number().min(0).max(3),
               prompt: z.string().min(1),
+              segmentName: z.string().optional(),
             })
           ),
           referenceImages: z.array(z.string()).optional(),
@@ -403,13 +498,20 @@ export const appRouter = router({
           throw new Error("Brief not found or access denied");
         }
 
+        const dur = input.duration || 15;
         const results = [];
+
         for (const seg of input.segments) {
           // Check if a job already exists for this segment
           const existing = await getVideoJobByBriefAndSegment(input.briefId, seg.segmentIndex);
           if (existing && (existing.status === "created" || existing.status === "processing")) {
             results.push({ jobId: existing.id, segmentIndex: seg.segmentIndex, status: existing.status });
             continue;
+          }
+
+          // Delete old job if exists
+          if (existing) {
+            await deleteVideoJob(existing.id);
           }
 
           const jobId = await createVideoJob({
@@ -420,15 +522,16 @@ export const appRouter = router({
             status: "pending",
             aspectRatio: "9:16",
             resolution: "720p",
-            duration: input.duration || 15,
+            duration: dur,
           });
 
           try {
+            console.log("[WaveSpeed] Submitting bulk task: duration=" + dur + ", segmentIndex=" + seg.segmentIndex);
             const result = await submitVideoTask({
               prompt: seg.prompt,
               aspectRatio: "9:16",
               resolution: "720p",
-              duration: input.duration || 15,
+              duration: dur,
               referenceImages: input.referenceImages,
             });
 
@@ -451,6 +554,91 @@ export const appRouter = router({
         return { results };
       }),
 
+    /** Regenerate a segment with feedback — updates prompt via LLM then resubmits */
+    regenerate: protectedProcedure
+      .input(
+        z.object({
+          briefId: z.number(),
+          segmentIndex: z.number().min(0).max(3),
+          originalPrompt: z.string().min(1),
+          feedback: z.string().min(1),
+          referenceImages: z.array(z.string()).optional(),
+          duration: z.number().min(4).max(15).optional(),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        // Use LLM to revise the prompt based on feedback
+        const revisionResponse = await invokeLLM({
+          messages: [
+            {
+              role: "system",
+              content: "You are the Seedance 2.0 UGC Ad Director. You revise video prompts based on user feedback. Output ONLY the revised prompt text that goes inside the code block — no markdown fences, no headers, no explanation. Keep the same format: 9:16, 15 seconds, same creator description, same time blocks [0:00-0:05], [0:05-0:10], [0:10-0:15], and Audio line. Apply the feedback while maintaining all Seedance 2.0 rules (UGC style, iPhone handheld, natural dialogue, no cinematic language).",
+            },
+            {
+              role: "user",
+              content: "Here is the original Seedance 2.0 prompt:\n\n" + input.originalPrompt + "\n\nUser feedback:\n" + input.feedback + "\n\nRevise the prompt to address this feedback. Output ONLY the revised prompt content.",
+            },
+          ],
+        });
+
+        const revisedPrompt =
+          typeof revisionResponse.choices[0]?.message?.content === "string"
+            ? revisionResponse.choices[0].message.content.trim()
+            : input.originalPrompt;
+
+        // Delete old video job for this segment
+        const existing = await getVideoJobByBriefAndSegment(input.briefId, input.segmentIndex);
+        if (existing) {
+          await deleteVideoJob(existing.id);
+        }
+
+        const dur = input.duration || 15;
+
+        // Create new video job with revised prompt and feedback
+        const jobId = await createVideoJob({
+          briefId: input.briefId,
+          userId: ctx.user.id,
+          segmentIndex: input.segmentIndex,
+          prompt: revisedPrompt,
+          feedback: input.feedback,
+          status: "pending",
+          aspectRatio: "9:16",
+          resolution: "720p",
+          duration: dur,
+        });
+
+        // Submit to WaveSpeed
+        try {
+          console.log("[WaveSpeed] Regenerating segment " + input.segmentIndex + " with feedback, duration=" + dur);
+          const result = await submitVideoTask({
+            prompt: revisedPrompt,
+            aspectRatio: "9:16",
+            resolution: "720p",
+            duration: dur,
+            referenceImages: input.referenceImages,
+          });
+
+          await updateVideoJob(jobId, {
+            wavespeedTaskId: result.data.id,
+            status: "created",
+          });
+
+          return { jobId, status: "created", revisedPrompt, wavespeedTaskId: result.data.id };
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : "Unknown error";
+          await updateVideoJob(jobId, {
+            status: "failed",
+            errorMessage: errMsg,
+          });
+          throw new Error("Failed to submit regeneration task: " + errMsg);
+        }
+      }),
+
     checkStatus: protectedProcedure
       .input(z.object({ jobId: z.number() }))
       .query(async ({ input, ctx }) => {
@@ -467,6 +655,8 @@ export const appRouter = router({
             videoUrl: job.videoUrl,
             errorMessage: job.errorMessage,
             segmentIndex: job.segmentIndex,
+            prompt: job.prompt,
+            feedback: job.feedback,
           };
         }
 
@@ -494,6 +684,8 @@ export const appRouter = router({
               videoUrl: newStatus === "completed" ? result.data.outputs?.[0] || null : null,
               errorMessage: newStatus === "failed" ? result.data.error || null : null,
               segmentIndex: job.segmentIndex,
+              prompt: job.prompt,
+              feedback: job.feedback,
             };
           } catch {
             return {
@@ -502,6 +694,8 @@ export const appRouter = router({
               videoUrl: job.videoUrl,
               errorMessage: job.errorMessage,
               segmentIndex: job.segmentIndex,
+              prompt: job.prompt,
+              feedback: job.feedback,
             };
           }
         }
@@ -512,6 +706,8 @@ export const appRouter = router({
           videoUrl: job.videoUrl,
           errorMessage: job.errorMessage,
           segmentIndex: job.segmentIndex,
+          prompt: job.prompt,
+          feedback: job.feedback,
         };
       }),
 
@@ -531,6 +727,8 @@ export const appRouter = router({
           videoUrl: j.videoUrl,
           errorMessage: j.errorMessage,
           duration: j.duration,
+          prompt: j.prompt,
+          feedback: j.feedback,
           createdAt: j.createdAt,
         }));
       }),
@@ -547,6 +745,12 @@ export const appRouter = router({
         const brief = await getBriefById(input.briefId);
         if (!brief || brief.userId !== ctx.user.id) {
           throw new Error("Brief not found or access denied");
+        }
+
+        // Delete any existing failed stitch job so we can retry
+        const existingStitch = await getStitchJobByBriefId(input.briefId);
+        if (existingStitch && existingStitch.status === "failed") {
+          await deleteStitchJob(existingStitch.id);
         }
 
         // Get all completed video jobs for this brief
@@ -659,7 +863,6 @@ export const appRouter = router({
               };
             }
           } catch {
-            // If polling fails, return current cached status
             return {
               id: job.id,
               status: job.status,

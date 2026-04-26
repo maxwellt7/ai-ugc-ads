@@ -42,5 +42,24 @@
 - [x] Store final video URL in database for persistence
 - [x] Write vitest tests for stitch routes (12 tests covering create, checkStatus, getByBrief, and buildStitchEdit)
 
-## Bug Fixes
-- [x] Fix video duration from 5s to 15s (each segment should be 15 seconds, not 5)
+## Bug Fixes (Round 2)
+- [x] Fix WaveSpeed API duration: code sends duration=15 explicitly, DB default changed from 5 to 15, request logging added to verify
+- [x] Fix segment count enforcement: LLM prompt now says "EXACTLY N segments" with explicit instructions to combine/split script content
+- [x] Fix avatar/creator consistency: LLM prompt now requires a detailed Creator Persona description repeated verbatim in every segment prompt
+- [x] Fix stitch button: stitch.create now deletes failed stitch jobs to allow retry; canStitch logic updated in BriefResult
+- [x] Fix campaign summary duration: uses segmentCount × 15s correctly in the LLM prompt
+
+## New Features (Round 2)
+- [x] Per-segment feedback and regeneration: video.regenerate route uses LLM to revise prompt based on feedback, then resubmits to WaveSpeed
+- [x] Feedback UI: textarea under each completed/failed video with "Regenerate with Feedback" button
+- [x] Video naming conventions: BriefResult shows segment names from brief headers (e.g., "Segment 1 — Hook")
+- [x] Enhanced history page: shows video generation progress (completed/total), stitch status badges, and final ad ready indicator
+- [x] Database improvements: feedback column on video_jobs, video/stitch summary queries for history
+
+## Bug Fixes & Test Coverage (Round 3)
+- [x] Fix video.test.ts: update all duration values from 5 to 15 in mock fixtures and test inputs
+- [x] Fix video.test.ts: add feedback field to all mock video job fixtures
+- [x] Add video.regenerate test suite: 7 tests covering auth, LLM revision, WaveSpeed submission, feedback storage, duration defaults, and old job deletion
+- [x] Add segment count enforcement post-processing: truncate extra LLM-generated segments to match requested count, re-append Step 4 review section if cut off
+- [x] Frontend segment enforcement: BriefResult.tsx already slices parsed segments to brief.segmentCount
+- [x] All 49 tests passing across 6 test files (18 video, 13 stitch, 13 brief, 2 WaveSpeed, 2 Shotstack, 1 auth)

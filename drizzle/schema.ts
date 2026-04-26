@@ -49,7 +49,8 @@ export const videoJobs = mysqlTable("video_jobs", {
   errorMessage: text("errorMessage"),
   aspectRatio: varchar("aspectRatio", { length: 20 }).default("9:16").notNull(),
   resolution: varchar("resolution", { length: 10 }).default("720p").notNull(),
-  duration: int("duration").default(5).notNull(),
+  duration: int("duration").default(15).notNull(),
+  feedback: text("feedback"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

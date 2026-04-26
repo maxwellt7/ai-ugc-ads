@@ -3,11 +3,12 @@ import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import { useLocation, useParams } from "wouter";
-import { useMemo, useEffect, useRef } from "react";
-import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle, Scissors, Clapperboard } from "lucide-react";
+import { useMemo, useEffect, useRef, useCallback } from "react";
+import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle, Scissors, Clapperboard, MessageSquare, Send } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 import { Streamdown } from "streamdown";
+import { Textarea } from "@/components/ui/textarea";
 
 function extractSegmentPrompts(brief: string): { title: string; prompt: string }[] {
   const segments: { title: string; prompt: string }[] = [];
@@ -31,6 +32,8 @@ interface VideoJobState {
   status: VideoJobStatus;
   videoUrl: string | null;
   errorMessage: string | null;
+  prompt?: string | null;
+  feedback?: string | null;
 }
 
 function VideoStatusBadge({ status }: { status: VideoJobStatus }) {
@@ -81,6 +84,8 @@ function useVideoJobPoller(jobId: number | null, segmentIndex: number, onUpdate:
         status: data.status as VideoJobStatus,
         videoUrl: data.videoUrl ?? null,
         errorMessage: data.errorMessage ?? null,
+        prompt: data.prompt ?? null,
+        feedback: data.feedback ?? null,
       });
     }
   }, [data, segmentIndex, onUpdate]);
@@ -103,6 +108,9 @@ export default function BriefResult() {
   const [generatingSegment, setGeneratingSegment] = useState<number | null>(null);
   const [generatingAll, setGeneratingAll] = useState(false);
   const [stitching, setStitching] = useState(false);
+  const [feedbackText, setFeedbackText] = useState<Map<number, string>>(new Map());
+  const [feedbackOpen, setFeedbackOpen] = useState<Set<number>>(new Set());
+  const [regenerating, setRegenerating] = useState<number | null>(null);
 
   const { data: brief, isLoading } = trpc.brief.getById.useQuery(
     { id: briefId },
@@ -127,6 +135,8 @@ export default function BriefResult() {
             status: job.status as VideoJobStatus,
             videoUrl: job.videoUrl,
             errorMessage: job.errorMessage,
+            prompt: job.prompt,
+            feedback: job.feedback,
           });
         }
         return next;
@@ -136,11 +146,17 @@ export default function BriefResult() {
 
   const segments = useMemo(() => {
     if (!brief?.generatedBrief) return [];
-    return extractSegmentPrompts(brief.generatedBrief);
-  }, [brief?.generatedBrief]);
+    const parsed = extractSegmentPrompts(brief.generatedBrief);
+    // Enforce segment count: only return the number of segments the user requested
+    if (brief.segmentCount && parsed.length > brief.segmentCount) {
+      return parsed.slice(0, brief.segmentCount);
+    }
+    return parsed;
+  }, [brief?.generatedBrief, brief?.segmentCount]);
 
   const generateMutation = trpc.video.generate.useMutation();
   const generateAllMutation = trpc.video.generateAll.useMutation();
+  const regenerateMutation = trpc.video.regenerate.useMutation();
   const stitchCreateMutation = trpc.stitch.create.useMutation();
   const utils = trpc.useUtils();
 
@@ -176,22 +192,20 @@ export default function BriefResult() {
   }, [stitchStatusData, refetchStitch]);
 
   // Callback for when a poller updates a job state
-  const handleJobUpdate = (state: VideoJobState) => {
+  const handleJobUpdate = useCallback((state: VideoJobState) => {
     setVideoJobs((prev) => {
       const next = new Map(prev);
       const existing = next.get(state.segmentIndex);
-      // Only update if status actually changed
       if (existing && existing.status === state.status && existing.videoUrl === state.videoUrl) {
         return prev;
       }
       next.set(state.segmentIndex, state);
       return next;
     });
-    // If completed, invalidate the list query to keep DB in sync
     if (state.status === "completed" || state.status === "failed") {
       utils.video.listByBrief.invalidate({ briefId });
     }
-  };
+  }, [briefId, utils.video.listByBrief]);
 
   // Determine which jobs need polling (in-progress ones)
   const jobsToPolArray = useMemo(() => {
@@ -272,6 +286,69 @@ export default function BriefResult() {
     } finally {
       setGeneratingAll(false);
     }
+  };
+
+  const handleRegenerate = async (segmentIndex: number, originalPrompt: string) => {
+    const fb = feedbackText.get(segmentIndex) || "";
+    if (!fb.trim()) {
+      toast.error("Please provide feedback before regenerating");
+      return;
+    }
+    setRegenerating(segmentIndex);
+    try {
+      const result = await regenerateMutation.mutateAsync({
+        briefId,
+        segmentIndex,
+        originalPrompt,
+        feedback: fb.trim(),
+        duration: 15,
+      });
+
+      setVideoJobs((prev) => {
+        const next = new Map(prev);
+        next.set(segmentIndex, {
+          jobId: result.jobId,
+          segmentIndex,
+          status: result.status as VideoJobStatus,
+          videoUrl: null,
+          errorMessage: null,
+          prompt: result.revisedPrompt,
+          feedback: fb.trim(),
+        });
+        return next;
+      });
+
+      // Clear feedback
+      setFeedbackText((prev) => {
+        const next = new Map(prev);
+        next.delete(segmentIndex);
+        return next;
+      });
+      setFeedbackOpen((prev) => {
+        const next = new Set(prev);
+        next.delete(segmentIndex);
+        return next;
+      });
+
+      toast.success("Regenerating Segment " + (segmentIndex + 1) + " with your feedback!");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to regenerate";
+      toast.error(msg);
+    } finally {
+      setRegenerating(null);
+    }
+  };
+
+  const toggleFeedback = (index: number) => {
+    setFeedbackOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
   };
 
   const copySegment = async (prompt: string, index: number) => {
@@ -362,7 +439,8 @@ export default function BriefResult() {
     return job && job.status === "completed";
   });
 
-  const canStitch = allSegmentsCompleted && !existingStitchJob;
+  // Fixed: allow stitch when all segments complete AND either no stitch job exists OR previous stitch failed
+  const canStitch = allSegmentsCompleted && (!existingStitchJob || existingStitchJob.status === "failed");
   const stitchInProgress = existingStitchJob &&
     existingStitchJob.status !== "done" &&
     existingStitchJob.status !== "failed";
@@ -396,6 +474,9 @@ export default function BriefResult() {
     return labels[status] || labels.pending;
   };
 
+  // Build a naming convention for the brief
+  const briefName = brief.productName.replace(/\s+/g, "_") + "_" + brief.adGoal + "_" + brief.segmentCount + "seg";
+
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
       {/* Render pollers for in-progress jobs */}
@@ -419,84 +500,82 @@ export default function BriefResult() {
             </button>
             <Button
               onClick={() => navigate("/create")}
-              className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-sm px-4"
+              className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs px-4 h-9"
             >
-              New Brief
+              NEW BRIEF
             </Button>
           </div>
         </div>
       </nav>
 
-      <main className="flex-1 container py-12 max-w-4xl mx-auto">
-        {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-8">
-          <div>
-            <h1 className="font-display text-4xl md:text-5xl tracking-wider uppercase">
-              {brief.productName}
-            </h1>
-            <p className="text-muted-foreground font-sans text-sm mt-2 uppercase tracking-widest">
-              {brief.segmentCount} segments · {brief.adGoal} · {new Date(brief.createdAt).toLocaleDateString()}
-            </p>
+      <main className="container py-10 max-w-4xl mx-auto">
+        {/* Campaign Summary */}
+        <section className="mb-10">
+          <h1 className="font-display text-5xl md:text-6xl tracking-wider uppercase leading-none mb-2">
+            {brief.productName}
+          </h1>
+          <div className="brutal-divider mt-4 mb-6 max-w-[80px]" />
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm font-sans">
+            <div>
+              <span className="text-muted-foreground text-xs uppercase tracking-widest block mb-1">Goal</span>
+              <span className="text-foreground uppercase">{brief.adGoal}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground text-xs uppercase tracking-widest block mb-1">Segments</span>
+              <span className="text-foreground">{brief.segmentCount}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground text-xs uppercase tracking-widest block mb-1">Duration</span>
+              <span className="text-foreground">{brief.segmentCount * 15}s</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground text-xs uppercase tracking-widest block mb-1">Brief ID</span>
+              <span className="text-foreground font-mono text-xs">{briefName}</span>
+            </div>
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
+
+          {/* Action bar */}
+          <div className="flex flex-wrap gap-3 mt-6">
             <Button
               onClick={copyAll}
               variant="outline"
-              className="border-border text-foreground hover:bg-secondary font-sans uppercase tracking-widest text-xs px-4 h-10"
+              className="border-border text-foreground hover:bg-primary hover:text-primary-foreground font-sans uppercase tracking-widest text-xs h-10 px-4"
             >
-              {copiedAll ? <Check className="w-4 h-4 mr-2 text-green-400" /> : <Copy className="w-4 h-4 mr-2" />}
-              {copiedAll ? "COPIED" : "COPY ALL"}
+              {copiedAll ? <><Check className="w-3 h-3 mr-2 text-green-400" /> COPIED</> : <><Copy className="w-3 h-3 mr-2" /> COPY ALL</>}
             </Button>
             <Button
               onClick={downloadBrief}
               variant="outline"
-              className="border-border text-foreground hover:bg-secondary font-sans uppercase tracking-widest text-xs px-4 h-10"
+              className="border-border text-foreground hover:bg-primary hover:text-primary-foreground font-sans uppercase tracking-widest text-xs h-10 px-4"
             >
-              <Download className="w-4 h-4 mr-2" /> DOWNLOAD
+              <Download className="w-3 h-3 mr-2" /> DOWNLOAD BRIEF
             </Button>
-          </div>
-        </div>
-
-        <div className="brutal-divider mb-8" />
-
-        {/* Product Summary */}
-        <section className="mb-10">
-          <h2 className="font-display text-2xl tracking-wider uppercase mb-4">
-            CAMPAIGN <span className="text-primary">SUMMARY</span>
-          </h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-0">
-            {[
-              { label: "PRODUCT", value: brief.productName },
-              { label: "GOAL", value: brief.adGoal.toUpperCase() },
-              { label: "SEGMENTS", value: String(brief.segmentCount) },
-              { label: "DURATION", value: brief.segmentCount * 15 + "s" },
-            ].map((item, i) => (
-              <div key={i} className="border border-border p-4">
-                <span className="font-sans text-xs text-muted-foreground uppercase tracking-widest block">{item.label}</span>
-                <span className="font-display text-xl mt-1 block">{item.value}</span>
-              </div>
-            ))}
           </div>
         </section>
 
-        {/* Pinterest Links */}
+        <div className="brutal-divider mb-10" />
+
+        {/* Pinterest Casting Links */}
         {pinterestLinks.length > 0 && (
           <section className="mb-10">
             <h2 className="font-display text-2xl tracking-wider uppercase mb-4">
               PINTEREST <span className="text-primary">CASTING</span>
             </h2>
-            <div className="space-y-2">
-              {pinterestLinks.map((link: string, i: number) => (
+            <p className="text-muted-foreground font-sans text-xs uppercase tracking-widest mb-4">
+              Find your creator — pick ONE consistent character reference for all segments
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {pinterestLinks.map((link, i) => (
                 <a
                   key={i}
                   href={link}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-3 border border-border p-3 hover:border-primary/50 hover:bg-secondary/30 transition-all group"
+                  className="flex items-center gap-3 p-3 border border-border hover:border-primary/50 transition-colors group"
                 >
-                  <ExternalLink className="w-4 h-4 text-muted-foreground group-hover:text-primary flex-shrink-0" />
-                  <span className="font-mono text-xs text-muted-foreground group-hover:text-foreground truncate">
-                    {link}
+                  <ExternalLink className="w-4 h-4 text-primary flex-shrink-0" />
+                  <span className="font-mono text-xs text-muted-foreground group-hover:text-foreground transition-colors truncate">
+                    {decodeURIComponent(link.split("q=")[1] || "").replace(/\+/g, " ")}
                   </span>
                 </a>
               ))}
@@ -506,12 +585,12 @@ export default function BriefResult() {
 
         <div className="brutal-divider mb-10" />
 
-        {/* Video Generation Section */}
+        {/* Video Generation Section — unified with prompts and feedback */}
         {segments.length > 0 && (
           <section className="mb-10">
             <div className="flex items-center justify-between mb-6">
               <h2 className="font-display text-2xl tracking-wider uppercase">
-                VIDEO <span className="text-primary">GENERATION</span>
+                VIDEO <span className="text-primary">SEGMENTS</span>
               </h2>
               {!allSegmentsHaveVideo && (
                 <Button
@@ -528,21 +607,26 @@ export default function BriefResult() {
               )}
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-6">
               {segments.map((seg, i) => {
                 const job = videoJobs.get(i);
                 const isInProgress = job && (job.status === "created" || job.status === "processing" || job.status === "pending");
                 const isComplete = job?.status === "completed";
                 const isFailed = job?.status === "failed";
+                const isFeedbackOpen = feedbackOpen.has(i);
+                const currentFeedback = feedbackText.get(i) || "";
+                const segmentLabel = briefName + "_seg" + (i + 1);
 
                 return (
                   <div key={i} className="border border-border">
+                    {/* Segment header */}
                     <div className="flex items-center justify-between p-4 border-b border-border bg-secondary/30">
                       <div className="flex items-center gap-3 min-w-0">
                         <span className="font-display text-lg tracking-wider uppercase truncate">{seg.title}</span>
                         {job && <VideoStatusBadge status={job.status} />}
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="font-mono text-[10px] text-muted-foreground/60 hidden md:block">{segmentLabel}</span>
                         <Button
                           onClick={() => copySegment(seg.prompt, i)}
                           variant="outline"
@@ -576,8 +660,19 @@ export default function BriefResult() {
 
                     {/* Prompt text */}
                     <pre className="p-4 font-mono text-xs leading-relaxed text-muted-foreground overflow-x-auto whitespace-pre-wrap border-b border-border">
-                      {seg.prompt}
+                      {job?.prompt || seg.prompt}
                     </pre>
+
+                    {/* Previous feedback if any */}
+                    {job?.feedback && (
+                      <div className="px-4 py-2 bg-primary/5 border-b border-border">
+                        <div className="flex items-center gap-2 mb-1">
+                          <MessageSquare className="w-3 h-3 text-primary" />
+                          <span className="font-sans text-[10px] uppercase tracking-widest text-primary">Previous Feedback</span>
+                        </div>
+                        <p className="font-sans text-xs text-muted-foreground">{job.feedback}</p>
+                      </div>
+                    )}
 
                     {/* Video Player when completed */}
                     {isComplete && job.videoUrl && (
@@ -590,15 +685,76 @@ export default function BriefResult() {
                             playsInline
                           />
                         </div>
-                        <div className="flex justify-center mt-3">
+                        <div className="flex justify-center gap-4 mt-3">
                           <a
                             href={job.videoUrl}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-2 text-xs font-sans uppercase tracking-widest text-primary hover:text-primary/80 transition-colors"
                           >
-                            <Download className="w-3 h-3" /> DOWNLOAD VIDEO
+                            <Download className="w-3 h-3" /> DOWNLOAD
                           </a>
+                          <button
+                            onClick={() => toggleFeedback(i)}
+                            className="inline-flex items-center gap-2 text-xs font-sans uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <MessageSquare className="w-3 h-3" /> {isFeedbackOpen ? "CLOSE" : "FEEDBACK"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Feedback & Regeneration panel */}
+                    {(isComplete || isFailed) && isFeedbackOpen && (
+                      <div className="p-4 border-t border-border bg-secondary/5">
+                        <div className="flex items-center gap-2 mb-3">
+                          <MessageSquare className="w-4 h-4 text-primary" />
+                          <span className="font-sans text-xs uppercase tracking-widest text-foreground">
+                            Provide Feedback & Regenerate
+                          </span>
+                        </div>
+                        <Textarea
+                          value={currentFeedback}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setFeedbackText((prev) => {
+                              const next = new Map(prev);
+                              next.set(i, val);
+                              return next;
+                            });
+                          }}
+                          placeholder="e.g. The creator should be smiling more, the lighting is too dark, make the product more visible in the first 5 seconds..."
+                          rows={3}
+                          className="bg-input border-border text-foreground font-sans text-sm px-3 py-2 placeholder:text-muted-foreground/50 resize-none mb-3"
+                        />
+                        <Button
+                          onClick={() => handleRegenerate(i, job?.prompt || seg.prompt)}
+                          disabled={regenerating === i || !currentFeedback.trim()}
+                          className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs h-9 px-4"
+                        >
+                          {regenerating === i ? (
+                            <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> REGENERATING...</>
+                          ) : (
+                            <><Send className="w-3 h-3 mr-1" /> REGENERATE WITH FEEDBACK</>
+                          )}
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Failed — show feedback toggle */}
+                    {isFailed && !isFeedbackOpen && (
+                      <div className="p-4 bg-red-500/5 border-t border-red-500/20">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-start gap-2">
+                            <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                            <span className="font-mono text-xs text-red-400">{job?.errorMessage || "Generation failed"}</span>
+                          </div>
+                          <button
+                            onClick={() => toggleFeedback(i)}
+                            className="text-xs font-sans uppercase tracking-widest text-primary hover:text-primary/80 flex-shrink-0"
+                          >
+                            FEEDBACK & RETRY
+                          </button>
                         </div>
                       </div>
                     )}
@@ -613,16 +769,6 @@ export default function BriefResult() {
                         <span className="font-sans text-xs text-muted-foreground uppercase tracking-widest">
                           Generating 15s video... this may take 2-5 minutes
                         </span>
-                      </div>
-                    )}
-
-                    {/* Error state */}
-                    {isFailed && job.errorMessage && (
-                      <div className="p-4 bg-red-500/5 border-t border-red-500/20">
-                        <div className="flex items-start gap-2">
-                          <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
-                          <span className="font-mono text-xs text-red-400">{job.errorMessage}</span>
-                        </div>
                       </div>
                     )}
                   </div>
@@ -648,18 +794,11 @@ export default function BriefResult() {
                 >
                   {stitching ? (
                     <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> SUBMITTING...</>
+                  ) : existingStitchJob?.status === "failed" ? (
+                    <><RefreshCw className="w-4 h-4 mr-2" /> RETRY STITCH</>
                   ) : (
                     <><Scissors className="w-4 h-4 mr-2" /> STITCH FINAL AD</>
                   )}
-                </Button>
-              )}
-              {stitchFailed && !canStitch && (
-                <Button
-                  onClick={handleStitch}
-                  disabled={stitching}
-                  className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs px-5 h-10"
-                >
-                  <RefreshCw className="w-4 h-4 mr-2" /> RETRY STITCH
                 </Button>
               )}
             </div>
@@ -676,7 +815,7 @@ export default function BriefResult() {
                   {stitchStatusLabel(existingStitchJob?.status || "pending").label}
                 </span>
                 <span className="font-sans text-xs text-muted-foreground uppercase tracking-widest">
-                  Stitching {existingStitchJob?.segmentCount || segments.length} segments into final ad... this may take 1-2 minutes
+                  Stitching {existingStitchJob?.segmentCount || segments.length} segments into final ad...
                 </span>
               </div>
             )}
@@ -711,7 +850,7 @@ export default function BriefResult() {
                     />
                   </div>
                   <p className="text-center mt-4 font-sans text-xs text-muted-foreground uppercase tracking-widest">
-                    {existingStitchJob.segmentCount} segments · {(existingStitchJob.segmentCount || 0) * 15}s total
+                    {briefName} · {existingStitchJob.segmentCount} segments · {(existingStitchJob.segmentCount || 0) * 15}s
                   </p>
                 </div>
               </div>
@@ -729,44 +868,6 @@ export default function BriefResult() {
                 </div>
               </div>
             )}
-          </section>
-        )}
-
-        <div className="brutal-divider mb-10" />
-
-        {/* Seedance Prompts (copy-paste section) */}
-        {segments.length > 0 && (
-          <section className="mb-10">
-            <h2 className="font-display text-2xl tracking-wider uppercase mb-6">
-              SEEDANCE <span className="text-primary">PROMPTS</span>
-            </h2>
-            <p className="text-muted-foreground font-sans text-xs uppercase tracking-widest mb-4">
-              Copy-paste ready prompts for manual generation in Seedance 2.0
-            </p>
-            <div className="space-y-6">
-              {segments.map((seg, i) => (
-                <div key={i} className="border border-border">
-                  <div className="flex items-center justify-between p-4 border-b border-border bg-secondary/30">
-                    <span className="font-display text-lg tracking-wider uppercase">{seg.title}</span>
-                    <Button
-                      onClick={() => copySegment(seg.prompt, i)}
-                      variant="outline"
-                      size="sm"
-                      className="border-border text-foreground hover:bg-primary hover:text-primary-foreground font-sans uppercase tracking-widest text-xs"
-                    >
-                      {copiedIndex === i ? (
-                        <><Check className="w-3 h-3 mr-1 text-green-400" /> COPIED</>
-                      ) : (
-                        <><Copy className="w-3 h-3 mr-1" /> COPY</>
-                      )}
-                    </Button>
-                  </div>
-                  <pre className="p-4 font-mono text-xs leading-relaxed text-muted-foreground overflow-x-auto whitespace-pre-wrap">
-                    {seg.prompt}
-                  </pre>
-                </div>
-              ))}
-            </div>
           </section>
         )}
 

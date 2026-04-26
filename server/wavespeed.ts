@@ -54,6 +54,8 @@ export async function submitVideoTask(params: WavespeedSubmitParams): Promise<Wa
     body.reference_images = params.referenceImages;
   }
 
+  console.log("[WaveSpeed] Request body:", JSON.stringify(body, null, 2));
+
   const response = await fetch(`${WAVESPEED_BASE_URL}/bytedance/seedance-2.0/text-to-video`, {
     method: "POST",
     headers: {
@@ -68,7 +70,9 @@ export async function submitVideoTask(params: WavespeedSubmitParams): Promise<Wa
     throw new Error(`WaveSpeed API error (${response.status}): ${errorText}`);
   }
 
-  return response.json() as Promise<WavespeedSubmitResponse>;
+  const result = await response.json() as WavespeedSubmitResponse;
+  console.log("[WaveSpeed] Response:", JSON.stringify({ code: result.code, message: result.message, taskId: result.data?.id, status: result.data?.status }));
+  return result;
 }
 
 export async function getVideoTaskResult(taskId: string): Promise<WavespeedResultResponse> {

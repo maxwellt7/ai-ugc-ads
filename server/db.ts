@@ -1,4 +1,4 @@
-import { desc, eq, and } from "drizzle-orm";
+import { desc, eq, and, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users, briefs, InsertBrief, videoJobs, InsertVideoJob, stitchJobs, InsertStitchJob } from "../drizzle/schema";
 import { ENV } from './_core/env';
@@ -109,6 +109,7 @@ export async function getBriefsByUserId(userId: number) {
       productName: briefs.productName,
       adGoal: briefs.adGoal,
       segmentCount: briefs.segmentCount,
+      toneVibe: briefs.toneVibe,
       createdAt: briefs.createdAt,
     })
     .from(briefs)
@@ -153,7 +154,7 @@ export async function getVideoJobById(id: number) {
   return result.length > 0 ? result[0] : null;
 }
 
-export async function updateVideoJob(id: number, data: Partial<Pick<InsertVideoJob, "status" | "wavespeedTaskId" | "videoUrl" | "errorMessage">>) {
+export async function updateVideoJob(id: number, data: Partial<Pick<InsertVideoJob, "status" | "wavespeedTaskId" | "videoUrl" | "errorMessage" | "prompt" | "feedback">>) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
@@ -168,8 +169,17 @@ export async function getVideoJobByBriefAndSegment(briefId: number, segmentIndex
     .select()
     .from(videoJobs)
     .where(and(eq(videoJobs.briefId, briefId), eq(videoJobs.segmentIndex, segmentIndex)))
+    .orderBy(desc(videoJobs.createdAt))
     .limit(1);
   return result.length > 0 ? result[0] : null;
+}
+
+/** Delete a video job so a fresh one can be created for the same segment */
+export async function deleteVideoJob(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.delete(videoJobs).where(eq(videoJobs.id, id));
 }
 
 // Stitch job helpers
@@ -208,4 +218,56 @@ export async function updateStitchJob(id: number, data: Partial<Pick<InsertStitc
   if (!db) throw new Error("Database not available");
 
   await db.update(stitchJobs).set(data).where(eq(stitchJobs.id, id));
+}
+
+/** Delete a stitch job so a fresh one can be created */
+export async function deleteStitchJob(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.delete(stitchJobs).where(eq(stitchJobs.id, id));
+}
+
+// Enhanced history: get video summary for a list of brief IDs
+export async function getVideoSummaryByBriefIds(briefIds: number[]) {
+  if (briefIds.length === 0) return [];
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const results = await db
+    .select({
+      briefId: videoJobs.briefId,
+      totalJobs: sql<number>`COUNT(*)`,
+      completedJobs: sql<number>`SUM(CASE WHEN ${videoJobs.status} = 'completed' THEN 1 ELSE 0 END)`,
+      failedJobs: sql<number>`SUM(CASE WHEN ${videoJobs.status} = 'failed' THEN 1 ELSE 0 END)`,
+    })
+    .from(videoJobs)
+    .where(sql`${videoJobs.briefId} IN (${sql.join(briefIds.map(id => sql`${id}`), sql`, `)})`)
+    .groupBy(videoJobs.briefId);
+
+  return results;
+}
+
+export async function getStitchSummaryByBriefIds(briefIds: number[]) {
+  if (briefIds.length === 0) return [];
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const results = await db
+    .select({
+      briefId: stitchJobs.briefId,
+      status: stitchJobs.status,
+      finalVideoUrl: stitchJobs.finalVideoUrl,
+    })
+    .from(stitchJobs)
+    .where(sql`${stitchJobs.briefId} IN (${sql.join(briefIds.map(id => sql`${id}`), sql`, `)})`)
+    .orderBy(desc(stitchJobs.createdAt));
+
+  // Deduplicate — keep only the latest stitch per brief
+  const seen = new Set<number>();
+  return results.filter((r) => {
+    if (seen.has(r.briefId)) return false;
+    seen.add(r.briefId);
+    return true;
+  });
 }

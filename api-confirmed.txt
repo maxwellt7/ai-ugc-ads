@@ -1,0 +1,15 @@
+WaveSpeed Seedance 2.0 Text-to-Video API Confirmed Parameters:
+- Endpoint: POST https://api.wavespeed.ai/api/v3/bytedance/seedance-2.0/text-to-video
+- duration: integer, 4-15, default 5
+- aspect_ratio: string, default "16:9"
+- resolution: string, default "720p", options: 480p, 720p, 1080p
+- reference_images: array of URLs (for visual consistency)
+- reference_videos: array of URLs (total <= 15s)
+- reference_audios: array of URLs (total <= 15s)
+
+KEY FINDING: Default is 5 seconds. We MUST explicitly send duration: 15.
+Our code already does this. The issue might be that the API is returning 5s clips
+despite receiving duration: 15. Need to add logging to verify.
+
+Also: reference_images can be used to maintain creator consistency across segments!
+This is the key to fixing the avatar inconsistency issue.

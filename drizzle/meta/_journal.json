@@ -29,6 +29,13 @@
       "when": 1777244082118,
       "tag": "0003_natural_tiger_shark",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1777245391584,
+      "tag": "0004_silent_killmonger",
+      "breakpoints": true
     }
   ]
 }

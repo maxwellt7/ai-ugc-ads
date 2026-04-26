@@ -1,0 +1,31 @@
+SEEDANCE 2.0 DURATION & BEST PRACTICES RESEARCH
+=================================================
+
+KEY FINDING: Duration drift is a real issue with longer clips.
+- The WaveSpeed blog recommends 6-8 seconds for first passes
+- Past 12 seconds, characters drift off-model, colors shift, costume changes mid-shot
+- For 15+ second results, the recommendation is to break into 3 shots and stitch
+- This explains the avatar inconsistency issue!
+
+AVATAR CONSISTENCY:
+- The model has to "remember" the scene - longer = more drift
+- Each segment generates independently with no visual continuity
+- Solution: Use shorter clips (6-8s) and stitch, OR use image-to-video with a reference image
+- The image-to-video endpoint supports up to 4 reference images
+
+PRACTICAL APPROACH FOR OUR APP:
+1. Keep text-to-video at the standard endpoint (not turbo)
+2. Consider using image-to-video with a reference frame for consistency
+3. The "turbo" variant may be capping at 5s - need to check our endpoint URL
+4. Our current endpoint: /bytedance/seedance-2.0/text-to-video
+
+API ENDPOINT CHECK:
+- Standard: /bytedance/seedance-2.0/text-to-video (supports 4-15s)
+- Fast/Turbo: /bytedance/seedance-2.0-fast/text-to-video-turbo (may cap at 5s)
+- We're using the STANDARD endpoint, so 15s should work
+
+DURATION PARAMETER:
+- The API accepts integer seconds 4-15
+- Our code sends duration: 15 correctly
+- The issue might be that the API is returning shorter clips despite the parameter
+- OR the "fast" model variant has a shorter max duration

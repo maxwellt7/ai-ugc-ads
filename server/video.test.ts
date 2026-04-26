@@ -29,6 +29,25 @@ vi.mock("./wavespeed", () => ({
   }),
 }));
 
+// Mock the LLM module (needed for video.regenerate)
+vi.mock("./_core/llm", () => ({
+  invokeLLM: vi.fn().mockResolvedValue({
+    id: "test",
+    created: Date.now(),
+    model: "test",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: "9:16. 15 seconds. Revised prompt based on feedback. UGC style. iPhone handheld.\n\n[0:00-0:05] Revised opening.\n\n[0:05-0:10] Revised middle.\n\n[0:10-0:15] Revised ending.\n\nAudio: Warm female voice. Bedroom acoustics.",
+        },
+        finish_reason: "stop",
+      },
+    ],
+  }),
+}));
+
 // Mock the db module
 vi.mock("./db", async () => {
   const actual = await vi.importActual("./db");
@@ -48,7 +67,8 @@ vi.mock("./db", async () => {
         errorMessage: null,
         aspectRatio: "9:16",
         resolution: "720p",
-        duration: 5,
+        duration: 15,
+        feedback: null,
         createdAt: new Date(),
       },
     ]),
@@ -64,11 +84,13 @@ vi.mock("./db", async () => {
       errorMessage: null,
       aspectRatio: "9:16",
       resolution: "720p",
-      duration: 5,
+      duration: 15,
+      feedback: null,
       createdAt: new Date(),
     }),
     getVideoJobByBriefAndSegment: vi.fn().mockResolvedValue(null),
     updateVideoJob: vi.fn().mockResolvedValue(undefined),
+    deleteVideoJob: vi.fn().mockResolvedValue(undefined),
     getBriefById: vi.fn().mockResolvedValue({
       id: 1,
       userId: 1,
@@ -126,7 +148,7 @@ describe("video.generate", () => {
       briefId: 1,
       segmentIndex: 0,
       prompt: "9:16. 15 seconds. Single continuous shot. UGC style.",
-      duration: 5,
+      duration: 15,
     });
 
     expect(result).toHaveProperty("jobId");
@@ -196,7 +218,7 @@ describe("video.generateAll", () => {
         { segmentIndex: 0, prompt: "Segment 1 prompt" },
         { segmentIndex: 1, prompt: "Segment 2 prompt" },
       ],
-      duration: 5,
+      duration: 15,
     });
 
     expect(result.results).toHaveLength(2);
@@ -250,7 +272,8 @@ describe("video.checkStatus", () => {
       errorMessage: null,
       aspectRatio: "9:16",
       resolution: "720p",
-      duration: 5,
+      duration: 15,
+      feedback: null,
       createdAt: new Date(),
     });
 
@@ -295,7 +318,8 @@ describe("video.checkStatus", () => {
       errorMessage: null,
       aspectRatio: "9:16",
       resolution: "720p",
-      duration: 5,
+      duration: 15,
+      feedback: null,
       createdAt: new Date(),
     });
 
@@ -340,5 +364,191 @@ describe("video.listByBrief", () => {
     expect(result[0]).toHaveProperty("segmentIndex", 0);
     expect(result[0]).toHaveProperty("status", "completed");
     expect(result[0]).toHaveProperty("videoUrl", "https://cdn.wavespeed.ai/videos/test.mp4");
+    expect(result[0]).toHaveProperty("duration", 15);
+  });
+});
+
+describe("video.regenerate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("requires authentication", async () => {
+    const ctx: TrpcContext = {
+      user: null,
+      req: { protocol: "https", headers: {} } as TrpcContext["req"],
+      res: { clearCookie: () => {} } as TrpcContext["res"],
+    };
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.video.regenerate({
+        briefId: 1,
+        segmentIndex: 0,
+        originalPrompt: "original prompt",
+        feedback: "make it brighter",
+      })
+    ).rejects.toThrow();
+  });
+
+  it("rejects when brief does not belong to user", async () => {
+    const { getBriefById } = await import("./db");
+    (getBriefById as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: 1,
+      userId: 999,
+    });
+
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.video.regenerate({
+        briefId: 1,
+        segmentIndex: 0,
+        originalPrompt: "original prompt",
+        feedback: "make it brighter",
+      })
+    ).rejects.toThrow("Brief not found or access denied");
+  });
+
+  it("uses LLM to revise the prompt based on feedback and submits to WaveSpeed", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.video.regenerate({
+      briefId: 1,
+      segmentIndex: 0,
+      originalPrompt: "9:16. 15 seconds. Original prompt content.",
+      feedback: "Make the lighting warmer and the creator should be smiling more",
+      duration: 15,
+    });
+
+    expect(result).toHaveProperty("jobId");
+    expect(result).toHaveProperty("status", "created");
+    expect(result).toHaveProperty("revisedPrompt");
+    expect(result).toHaveProperty("wavespeedTaskId", "ws-task-123");
+    expect(result.revisedPrompt).toContain("Revised prompt based on feedback");
+  });
+
+  it("calls invokeLLM with original prompt and feedback", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await caller.video.regenerate({
+      briefId: 1,
+      segmentIndex: 0,
+      originalPrompt: "Original prompt text",
+      feedback: "Add more product close-ups",
+    });
+
+    const { invokeLLM } = await import("./_core/llm");
+    expect(invokeLLM).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({ role: "system" }),
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Original prompt text"),
+        }),
+      ]),
+    });
+    const call = (invokeLLM as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const userMsg = call.messages.find((m: { role: string }) => m.role === "user");
+    expect(userMsg.content).toContain("Add more product close-ups");
+  });
+
+  it("deletes existing video job before creating a new one", async () => {
+    const { getVideoJobByBriefAndSegment, deleteVideoJob, createVideoJob } = await import("./db");
+    (getVideoJobByBriefAndSegment as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: 42,
+      briefId: 1,
+      userId: 1,
+      segmentIndex: 0,
+      status: "completed",
+    });
+
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await caller.video.regenerate({
+      briefId: 1,
+      segmentIndex: 0,
+      originalPrompt: "original prompt",
+      feedback: "improve lighting",
+    });
+
+    expect(deleteVideoJob).toHaveBeenCalledWith(42);
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        briefId: 1,
+        segmentIndex: 0,
+        feedback: "improve lighting",
+        duration: 15,
+      })
+    );
+  });
+
+  it("stores feedback in the new video job record", async () => {
+    const { createVideoJob } = await import("./db");
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await caller.video.regenerate({
+      briefId: 1,
+      segmentIndex: 1,
+      originalPrompt: "original prompt",
+      feedback: "The product should be more visible in frame",
+    });
+
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        feedback: "The product should be more visible in frame",
+        segmentIndex: 1,
+      })
+    );
+  });
+
+  it("submits revised prompt to WaveSpeed with correct duration", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await caller.video.regenerate({
+      briefId: 1,
+      segmentIndex: 0,
+      originalPrompt: "original prompt",
+      feedback: "brighter lighting",
+      duration: 15,
+    });
+
+    const { submitVideoTask } = await import("./wavespeed");
+    expect(submitVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        duration: 15,
+        aspectRatio: "9:16",
+      })
+    );
+    const call = (submitVideoTask as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.prompt).toContain("Revised prompt based on feedback");
+  });
+
+  it("defaults to 15 second duration when not specified", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await caller.video.regenerate({
+      briefId: 1,
+      segmentIndex: 0,
+      originalPrompt: "original prompt",
+      feedback: "make it better",
+    });
+
+    const { submitVideoTask } = await import("./wavespeed");
+    expect(submitVideoTask).toHaveBeenCalledWith(
+      expect.objectContaining({ duration: 15 })
+    );
+
+    const { createVideoJob } = await import("./db");
+    expect(createVideoJob).toHaveBeenCalledWith(
+      expect.objectContaining({ duration: 15 })
+    );
   });
 });
