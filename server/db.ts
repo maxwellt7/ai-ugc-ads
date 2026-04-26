@@ -1,11 +1,10 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
+import { InsertUser, users, briefs, InsertBrief } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
@@ -89,4 +88,38 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
-// TODO: add feature queries here as your schema grows.
+// Brief helpers
+
+export async function createBrief(data: InsertBrief) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(briefs).values(data);
+  const insertId = result[0].insertId;
+  return insertId;
+}
+
+export async function getBriefsByUserId(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  return db
+    .select({
+      id: briefs.id,
+      productName: briefs.productName,
+      adGoal: briefs.adGoal,
+      segmentCount: briefs.segmentCount,
+      createdAt: briefs.createdAt,
+    })
+    .from(briefs)
+    .where(eq(briefs.userId, userId))
+    .orderBy(desc(briefs.createdAt));
+}
+
+export async function getBriefById(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.select().from(briefs).where(eq(briefs.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}

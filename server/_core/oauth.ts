@@ -20,6 +20,7 @@ export function registerOAuthRoutes(app: Express) {
     }
 
     try {
+      console.log("[OAuth] Callback received with code and state");
       const tokenResponse = await sdk.exchangeCodeForToken(code, state);
       const userInfo = await sdk.getUserInfo(tokenResponse.accessToken);
 

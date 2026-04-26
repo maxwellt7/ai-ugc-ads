@@ -257,47 +257,78 @@ class SDKServer {
   }
 
   async authenticateRequest(req: Request): Promise<User> {
-    // Regular authentication flow
     const cookies = this.parseCookies(req.headers.cookie);
     const sessionCookie = cookies.get(COOKIE_NAME);
-    const session = await this.verifySession(sessionCookie);
 
-    if (!session) {
-      throw ForbiddenError("Invalid session cookie");
+    if (!sessionCookie) {
+      throw ForbiddenError("Missing session cookie");
     }
 
-    const sessionUserId = session.openId;
-    const signedInAt = new Date();
-    let user = await db.getUserByOpenId(sessionUserId);
-
-    // If user not in DB, sync from OAuth server automatically
-    if (!user) {
-      try {
-        const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
-        await db.upsertUser({
-          openId: userInfo.openId,
-          name: userInfo.name || null,
-          email: userInfo.email ?? null,
-          loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
-          lastSignedIn: signedInAt,
-        });
-        user = await db.getUserByOpenId(userInfo.openId);
-      } catch (error) {
-        console.error("[Auth] Failed to sync user from OAuth:", error);
-        throw ForbiddenError("Failed to sync user info");
+    // Decode the JWT payload without verification to check appId
+    try {
+      const parts = sessionCookie.split(".");
+      if (parts.length === 3) {
+        const payload = JSON.parse(
+          Buffer.from(parts[1], "base64url").toString()
+        );
+        // If the cookie belongs to a different project, treat as unauthenticated
+        if (payload.appId && payload.appId !== ENV.appId) {
+          throw ForbiddenError("Cookie from different project");
+        }
       }
+    } catch (e: any) {
+      if (e?.message === "Cookie from different project") throw e;
+      // If decoding fails, continue with normal flow
     }
 
-    if (!user) {
-      throw ForbiddenError("User not found");
+    // Try local JWT verification first
+    let session = await this.verifySession(sessionCookie);
+    const signedInAt = new Date();
+
+    if (session) {
+      let user = await db.getUserByOpenId(session.openId);
+      if (!user) {
+        try {
+          const userInfo = await this.getUserInfoWithJwt(sessionCookie);
+          await db.upsertUser({
+            openId: userInfo.openId,
+            name: userInfo.name || null,
+            email: userInfo.email ?? null,
+            loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
+            lastSignedIn: signedInAt,
+          });
+          user = await db.getUserByOpenId(userInfo.openId);
+        } catch (error) {
+          console.error("[Auth] Failed to sync user from OAuth:", error);
+          throw ForbiddenError("Failed to sync user info");
+        }
+      }
+      if (!user) throw ForbiddenError("User not found");
+      await db.upsertUser({ openId: user.openId, lastSignedIn: signedInAt });
+      return user;
     }
 
-    await db.upsertUser({
-      openId: user.openId,
-      lastSignedIn: signedInAt,
-    });
+    // Local verification failed — try server-side validation
+    try {
+      const userInfo = await this.getUserInfoWithJwt(sessionCookie);
+      if (!userInfo.openId) throw ForbiddenError("No openId from server");
 
-    return user;
+      await db.upsertUser({
+        openId: userInfo.openId,
+        name: userInfo.name || null,
+        email: userInfo.email ?? null,
+        loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
+        lastSignedIn: signedInAt,
+      });
+
+      const user = await db.getUserByOpenId(userInfo.openId);
+      if (!user) throw ForbiddenError("User not found after sync");
+
+      await db.upsertUser({ openId: user.openId, lastSignedIn: signedInAt });
+      return user;
+    } catch (error) {
+      throw ForbiddenError("Invalid session");
+    }
   }
 }
 
