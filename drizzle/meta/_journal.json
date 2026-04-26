@@ -15,6 +15,13 @@
       "when": 1777230023854,
       "tag": "0001_motionless_shinko_yamashiro",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1777233597994,
+      "tag": "0002_smart_fat_cobra",
+      "breakpoints": true
     }
   ]
 }

@@ -4,7 +4,8 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { invokeLLM } from "./_core/llm";
 import { notifyOwner } from "./_core/notification";
-import { createBrief, getBriefsByUserId, getBriefById } from "./db";
+import { createBrief, getBriefsByUserId, getBriefById, createVideoJob, getVideoJobsByBriefId, getVideoJobById, updateVideoJob, getVideoJobByBriefAndSegment } from "./db";
+import { submitVideoTask, getVideoTaskResult } from "./wavespeed";
 import { storagePut } from "./storage";
 import { z } from "zod";
 
@@ -316,6 +317,221 @@ export const appRouter = router({
           return null;
         }
         return brief;
+      }),
+  }),
+
+  video: router({
+    generate: protectedProcedure
+      .input(
+        z.object({
+          briefId: z.number(),
+          segmentIndex: z.number().min(0).max(3),
+          prompt: z.string().min(1),
+          referenceImages: z.array(z.string()).optional(),
+          duration: z.number().min(4).max(15).optional(),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        // Check if a job already exists for this segment
+        const existing = await getVideoJobByBriefAndSegment(input.briefId, input.segmentIndex);
+        if (existing && (existing.status === "created" || existing.status === "processing")) {
+          return { jobId: existing.id, status: existing.status, message: "Video generation already in progress" };
+        }
+
+        // Verify the brief belongs to the user
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        // Create the video job record
+        const jobId = await createVideoJob({
+          briefId: input.briefId,
+          userId: ctx.user.id,
+          segmentIndex: input.segmentIndex,
+          prompt: input.prompt,
+          status: "pending",
+          aspectRatio: "9:16",
+          resolution: "720p",
+          duration: input.duration || 5,
+        });
+
+        // Submit to WaveSpeed API
+        try {
+          const result = await submitVideoTask({
+            prompt: input.prompt,
+            aspectRatio: "9:16",
+            resolution: "720p",
+            duration: input.duration || 5,
+            referenceImages: input.referenceImages,
+          });
+
+          await updateVideoJob(jobId, {
+            wavespeedTaskId: result.data.id,
+            status: "created",
+          });
+
+          return { jobId, status: "created", wavespeedTaskId: result.data.id };
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : "Unknown error";
+          await updateVideoJob(jobId, {
+            status: "failed",
+            errorMessage: errMsg,
+          });
+          throw new Error("Failed to submit video task: " + errMsg);
+        }
+      }),
+
+    generateAll: protectedProcedure
+      .input(
+        z.object({
+          briefId: z.number(),
+          segments: z.array(
+            z.object({
+              segmentIndex: z.number().min(0).max(3),
+              prompt: z.string().min(1),
+            })
+          ),
+          referenceImages: z.array(z.string()).optional(),
+          duration: z.number().min(4).max(15).optional(),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        const results = [];
+        for (const seg of input.segments) {
+          // Check if a job already exists for this segment
+          const existing = await getVideoJobByBriefAndSegment(input.briefId, seg.segmentIndex);
+          if (existing && (existing.status === "created" || existing.status === "processing")) {
+            results.push({ jobId: existing.id, segmentIndex: seg.segmentIndex, status: existing.status });
+            continue;
+          }
+
+          const jobId = await createVideoJob({
+            briefId: input.briefId,
+            userId: ctx.user.id,
+            segmentIndex: seg.segmentIndex,
+            prompt: seg.prompt,
+            status: "pending",
+            aspectRatio: "9:16",
+            resolution: "720p",
+            duration: input.duration || 5,
+          });
+
+          try {
+            const result = await submitVideoTask({
+              prompt: seg.prompt,
+              aspectRatio: "9:16",
+              resolution: "720p",
+              duration: input.duration || 5,
+              referenceImages: input.referenceImages,
+            });
+
+            await updateVideoJob(jobId, {
+              wavespeedTaskId: result.data.id,
+              status: "created",
+            });
+
+            results.push({ jobId, segmentIndex: seg.segmentIndex, status: "created" });
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : "Unknown error";
+            await updateVideoJob(jobId, {
+              status: "failed",
+              errorMessage: errMsg,
+            });
+            results.push({ jobId, segmentIndex: seg.segmentIndex, status: "failed", error: errMsg });
+          }
+        }
+
+        return { results };
+      }),
+
+    checkStatus: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const job = await getVideoJobById(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new Error("Video job not found or access denied");
+        }
+
+        // If already completed or failed, return cached result
+        if (job.status === "completed" || job.status === "failed") {
+          return {
+            id: job.id,
+            status: job.status,
+            videoUrl: job.videoUrl,
+            errorMessage: job.errorMessage,
+            segmentIndex: job.segmentIndex,
+          };
+        }
+
+        // Poll WaveSpeed API for status update
+        if (job.wavespeedTaskId) {
+          try {
+            const result = await getVideoTaskResult(job.wavespeedTaskId);
+            const newStatus = result.data.status === "completed" ? "completed" as const
+              : result.data.status === "failed" ? "failed" as const
+              : "processing" as const;
+
+            const updateData: Record<string, string> = { status: newStatus };
+            if (newStatus === "completed" && result.data.outputs?.length > 0) {
+              updateData.videoUrl = result.data.outputs[0];
+            }
+            if (newStatus === "failed" && result.data.error) {
+              updateData.errorMessage = result.data.error;
+            }
+
+            await updateVideoJob(job.id, updateData as any);
+
+            return {
+              id: job.id,
+              status: newStatus,
+              videoUrl: newStatus === "completed" ? result.data.outputs?.[0] || null : null,
+              errorMessage: newStatus === "failed" ? result.data.error || null : null,
+              segmentIndex: job.segmentIndex,
+            };
+          } catch {
+            return {
+              id: job.id,
+              status: job.status,
+              videoUrl: job.videoUrl,
+              errorMessage: job.errorMessage,
+              segmentIndex: job.segmentIndex,
+            };
+          }
+        }
+
+        return {
+          id: job.id,
+          status: job.status,
+          videoUrl: job.videoUrl,
+          errorMessage: job.errorMessage,
+          segmentIndex: job.segmentIndex,
+        };
+      }),
+
+    listByBrief: protectedProcedure
+      .input(z.object({ briefId: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        const jobs = await getVideoJobsByBriefId(input.briefId);
+        return jobs.map((j) => ({
+          id: j.id,
+          segmentIndex: j.segmentIndex,
+          status: j.status,
+          videoUrl: j.videoUrl,
+          errorMessage: j.errorMessage,
+          duration: j.duration,
+          createdAt: j.createdAt,
+        }));
       }),
   }),
 });

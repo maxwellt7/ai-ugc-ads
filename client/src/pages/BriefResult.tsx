@@ -3,8 +3,8 @@ import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import { useLocation, useParams } from "wouter";
-import { useMemo } from "react";
-import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink } from "lucide-react";
+import { useMemo, useEffect, useRef } from "react";
+import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 import { Streamdown } from "streamdown";
@@ -23,6 +23,75 @@ function extractSegmentPrompts(brief: string): { title: string; prompt: string }
   return segments;
 }
 
+type VideoJobStatus = "pending" | "created" | "processing" | "completed" | "failed";
+
+interface VideoJobState {
+  jobId: number;
+  segmentIndex: number;
+  status: VideoJobStatus;
+  videoUrl: string | null;
+  errorMessage: string | null;
+}
+
+function VideoStatusBadge({ status }: { status: VideoJobStatus }) {
+  const config: Record<VideoJobStatus, { label: string; color: string }> = {
+    pending: { label: "QUEUED", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40" },
+    created: { label: "SUBMITTED", color: "bg-blue-500/20 text-blue-400 border-blue-500/40" },
+    processing: { label: "GENERATING", color: "bg-purple-500/20 text-purple-400 border-purple-500/40" },
+    completed: { label: "COMPLETE", color: "bg-green-500/20 text-green-400 border-green-500/40" },
+    failed: { label: "FAILED", color: "bg-red-500/20 text-red-400 border-red-500/40" },
+  };
+  const c = config[status] || config.pending;
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-sans uppercase tracking-widest border ${c.color}`}>
+      {(status === "created" || status === "processing") && (
+        <Loader2 className="w-3 h-3 animate-spin" />
+      )}
+      {status === "completed" && <Check className="w-3 h-3" />}
+      {status === "failed" && <AlertCircle className="w-3 h-3" />}
+      {c.label}
+    </span>
+  );
+}
+
+/** Hook that polls a single video job via tRPC until terminal state */
+function useVideoJobPoller(jobId: number | null, segmentIndex: number, onUpdate: (state: VideoJobState) => void) {
+  const shouldPoll = jobId !== null && jobId > 0;
+  const terminalRef = useRef(false);
+
+  const { data } = trpc.video.checkStatus.useQuery(
+    { jobId: jobId! },
+    {
+      enabled: shouldPoll && !terminalRef.current,
+      refetchInterval: (query) => {
+        const status = query.state.data?.status;
+        if (status === "completed" || status === "failed") return false;
+        return 5000;
+      },
+    }
+  );
+
+  useEffect(() => {
+    if (data) {
+      const isTerminal = data.status === "completed" || data.status === "failed";
+      terminalRef.current = isTerminal;
+      onUpdate({
+        jobId: data.id,
+        segmentIndex: data.segmentIndex,
+        status: data.status as VideoJobStatus,
+        videoUrl: data.videoUrl ?? null,
+        errorMessage: data.errorMessage ?? null,
+      });
+    }
+  }, [data, segmentIndex, onUpdate]);
+}
+
+/** Wrapper component that polls one video job */
+function VideoJobPoller({ jobId, segmentIndex, onUpdate }: { jobId: number; segmentIndex: number; onUpdate: (state: VideoJobState) => void }) {
+  useVideoJobPoller(jobId, segmentIndex, onUpdate);
+  return null;
+}
+
 export default function BriefResult() {
   const { isAuthenticated, loading: authLoading } = useAuth();
   const [, navigate] = useLocation();
@@ -30,16 +99,147 @@ export default function BriefResult() {
   const briefId = parseInt(params.id || "0", 10);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
+  const [videoJobs, setVideoJobs] = useState<Map<number, VideoJobState>>(new Map());
+  const [generatingSegment, setGeneratingSegment] = useState<number | null>(null);
+  const [generatingAll, setGeneratingAll] = useState(false);
 
   const { data: brief, isLoading } = trpc.brief.getById.useQuery(
     { id: briefId },
     { enabled: briefId > 0 && isAuthenticated }
   );
 
+  // Load existing video jobs for this brief via tRPC
+  const { data: existingJobs } = trpc.video.listByBrief.useQuery(
+    { briefId },
+    { enabled: briefId > 0 && isAuthenticated }
+  );
+
+  // Seed videoJobs state from existing DB records
+  useEffect(() => {
+    if (existingJobs && existingJobs.length > 0) {
+      setVideoJobs((prev) => {
+        const next = new Map(prev);
+        for (const job of existingJobs) {
+          next.set(job.segmentIndex, {
+            jobId: job.id,
+            segmentIndex: job.segmentIndex,
+            status: job.status as VideoJobStatus,
+            videoUrl: job.videoUrl,
+            errorMessage: job.errorMessage,
+          });
+        }
+        return next;
+      });
+    }
+  }, [existingJobs]);
+
   const segments = useMemo(() => {
     if (!brief?.generatedBrief) return [];
     return extractSegmentPrompts(brief.generatedBrief);
   }, [brief?.generatedBrief]);
+
+  const generateMutation = trpc.video.generate.useMutation();
+  const generateAllMutation = trpc.video.generateAll.useMutation();
+  const utils = trpc.useUtils();
+
+  // Callback for when a poller updates a job state
+  const handleJobUpdate = (state: VideoJobState) => {
+    setVideoJobs((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(state.segmentIndex);
+      // Only update if status actually changed
+      if (existing && existing.status === state.status && existing.videoUrl === state.videoUrl) {
+        return prev;
+      }
+      next.set(state.segmentIndex, state);
+      return next;
+    });
+    // If completed, invalidate the list query to keep DB in sync
+    if (state.status === "completed" || state.status === "failed") {
+      utils.video.listByBrief.invalidate({ briefId });
+    }
+  };
+
+  // Determine which jobs need polling (in-progress ones)
+  const jobsToPolArray = useMemo(() => {
+    const result: { jobId: number; segmentIndex: number }[] = [];
+    const entries = Array.from(videoJobs.entries());
+    for (const [segIdx, job] of entries) {
+      if (job.status === "pending" || job.status === "created" || job.status === "processing") {
+        result.push({ jobId: job.jobId, segmentIndex: segIdx });
+      }
+    }
+    return result;
+  }, [videoJobs]);
+
+  const handleGenerateSegment = async (segmentIndex: number, prompt: string) => {
+    setGeneratingSegment(segmentIndex);
+    try {
+      const result = await generateMutation.mutateAsync({
+        briefId,
+        segmentIndex,
+        prompt,
+        duration: 5,
+      });
+
+      setVideoJobs((prev) => {
+        const next = new Map(prev);
+        next.set(segmentIndex, {
+          jobId: result.jobId,
+          segmentIndex,
+          status: result.status as VideoJobStatus,
+          videoUrl: null,
+          errorMessage: null,
+        });
+        return next;
+      });
+
+      toast.success("Video generation started for Segment " + (segmentIndex + 1));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to start video generation";
+      toast.error(msg);
+    } finally {
+      setGeneratingSegment(null);
+    }
+  };
+
+  const handleGenerateAll = async () => {
+    if (segments.length === 0) return;
+    setGeneratingAll(true);
+    try {
+      const segmentInputs = segments.map((seg, i) => ({
+        segmentIndex: i,
+        prompt: seg.prompt,
+      }));
+
+      const result = await generateAllMutation.mutateAsync({
+        briefId,
+        segments: segmentInputs,
+        duration: 5,
+      });
+
+      for (const r of result.results) {
+        setVideoJobs((prev) => {
+          const next = new Map(prev);
+          next.set(r.segmentIndex, {
+            jobId: r.jobId,
+            segmentIndex: r.segmentIndex,
+            status: r.status as VideoJobStatus,
+            videoUrl: null,
+            errorMessage: null,
+          });
+          return next;
+        });
+      }
+
+      toast.success("Video generation started for all " + segments.length + " segments!");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to start video generation";
+      toast.error(msg);
+    } finally {
+      setGeneratingAll(false);
+    }
+  };
 
   const copySegment = async (prompt: string, index: number) => {
     try {
@@ -105,7 +305,6 @@ export default function BriefResult() {
     );
   }
 
-  // Extract pinterest links
   const pinterestLinks: string[] = (() => {
     try {
       if (typeof brief.pinterestLinks === "string") {
@@ -120,8 +319,18 @@ export default function BriefResult() {
     }
   })();
 
+  const allSegmentsHaveVideo = segments.length > 0 && segments.every((_, i) => {
+    const job = videoJobs.get(i);
+    return job && (job.status === "created" || job.status === "processing" || job.status === "completed");
+  });
+
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
+      {/* Render pollers for in-progress jobs */}
+      {jobsToPolArray.map((j) => (
+        <VideoJobPoller key={j.jobId} jobId={j.jobId} segmentIndex={j.segmentIndex} onUpdate={handleJobUpdate} />
+      ))}
+
       {/* Nav */}
       <nav className="w-full border-b border-border">
         <div className="container flex items-center justify-between h-16">
@@ -157,7 +366,7 @@ export default function BriefResult() {
               {brief.segmentCount} segments · {brief.adGoal} · {new Date(brief.createdAt).toLocaleDateString()}
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <Button
               onClick={copyAll}
               variant="outline"
@@ -225,12 +434,143 @@ export default function BriefResult() {
 
         <div className="brutal-divider mb-10" />
 
-        {/* Segment Prompts */}
+        {/* Video Generation Section */}
+        {segments.length > 0 && (
+          <section className="mb-10">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="font-display text-2xl tracking-wider uppercase">
+                VIDEO <span className="text-primary">GENERATION</span>
+              </h2>
+              {!allSegmentsHaveVideo && (
+                <Button
+                  onClick={handleGenerateAll}
+                  disabled={generatingAll || allSegmentsHaveVideo}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs px-5 h-10"
+                >
+                  {generatingAll ? (
+                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> GENERATING...</>
+                  ) : (
+                    <><Film className="w-4 h-4 mr-2" /> GENERATE ALL VIDEOS</>
+                  )}
+                </Button>
+              )}
+            </div>
+
+            <div className="space-y-4">
+              {segments.map((seg, i) => {
+                const job = videoJobs.get(i);
+                const isInProgress = job && (job.status === "created" || job.status === "processing" || job.status === "pending");
+                const isComplete = job?.status === "completed";
+                const isFailed = job?.status === "failed";
+
+                return (
+                  <div key={i} className="border border-border">
+                    <div className="flex items-center justify-between p-4 border-b border-border bg-secondary/30">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span className="font-display text-lg tracking-wider uppercase truncate">{seg.title}</span>
+                        {job && <VideoStatusBadge status={job.status} />}
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <Button
+                          onClick={() => copySegment(seg.prompt, i)}
+                          variant="outline"
+                          size="sm"
+                          className="border-border text-foreground hover:bg-primary hover:text-primary-foreground font-sans uppercase tracking-widest text-xs"
+                        >
+                          {copiedIndex === i ? (
+                            <><Check className="w-3 h-3 mr-1 text-green-400" /> COPIED</>
+                          ) : (
+                            <><Copy className="w-3 h-3 mr-1" /> COPY</>
+                          )}
+                        </Button>
+                        {!isInProgress && !isComplete && (
+                          <Button
+                            onClick={() => handleGenerateSegment(i, seg.prompt)}
+                            disabled={generatingSegment === i || generatingAll}
+                            size="sm"
+                            className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs"
+                          >
+                            {generatingSegment === i ? (
+                              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> STARTING...</>
+                            ) : isFailed ? (
+                              <><RefreshCw className="w-3 h-3 mr-1" /> RETRY</>
+                            ) : (
+                              <><Play className="w-3 h-3 mr-1" /> GENERATE</>
+                            )}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Prompt text */}
+                    <pre className="p-4 font-mono text-xs leading-relaxed text-muted-foreground overflow-x-auto whitespace-pre-wrap border-b border-border">
+                      {seg.prompt}
+                    </pre>
+
+                    {/* Video Player when completed */}
+                    {isComplete && job.videoUrl && (
+                      <div className="p-4 bg-secondary/10">
+                        <div className="relative w-full max-w-[280px] mx-auto aspect-[9/16] bg-black border border-border">
+                          <video
+                            src={job.videoUrl}
+                            controls
+                            className="w-full h-full object-contain"
+                            playsInline
+                          />
+                        </div>
+                        <div className="flex justify-center mt-3">
+                          <a
+                            href={job.videoUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-2 text-xs font-sans uppercase tracking-widest text-primary hover:text-primary/80 transition-colors"
+                          >
+                            <Download className="w-3 h-3" /> DOWNLOAD VIDEO
+                          </a>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* In-progress spinner */}
+                    {isInProgress && (
+                      <div className="p-6 flex flex-col items-center gap-3 bg-secondary/10">
+                        <div className="relative w-16 h-16">
+                          <div className="absolute inset-0 border-2 border-primary/20 border-t-primary animate-spin" style={{ borderRadius: 0 }} />
+                          <Film className="absolute inset-0 m-auto w-6 h-6 text-primary" />
+                        </div>
+                        <span className="font-sans text-xs text-muted-foreground uppercase tracking-widest">
+                          Generating video... this may take 1-3 minutes
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Error state */}
+                    {isFailed && job.errorMessage && (
+                      <div className="p-4 bg-red-500/5 border-t border-red-500/20">
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                          <span className="font-mono text-xs text-red-400">{job.errorMessage}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        <div className="brutal-divider mb-10" />
+
+        {/* Seedance Prompts (copy-paste section) */}
         {segments.length > 0 && (
           <section className="mb-10">
             <h2 className="font-display text-2xl tracking-wider uppercase mb-6">
               SEEDANCE <span className="text-primary">PROMPTS</span>
             </h2>
+            <p className="text-muted-foreground font-sans text-xs uppercase tracking-widest mb-4">
+              Copy-paste ready prompts for manual generation in Seedance 2.0
+            </p>
             <div className="space-y-6">
               {segments.map((seg, i) => (
                 <div key={i} className="border border-border">

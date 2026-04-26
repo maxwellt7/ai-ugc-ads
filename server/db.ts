@@ -1,6 +1,6 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, briefs, InsertBrief } from "../drizzle/schema";
+import { InsertUser, users, briefs, InsertBrief, videoJobs, InsertVideoJob } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -121,5 +121,53 @@ export async function getBriefById(id: number) {
   if (!db) throw new Error("Database not available");
 
   const result = await db.select().from(briefs).where(eq(briefs.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+// Video job helpers
+
+export async function createVideoJob(data: InsertVideoJob) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(videoJobs).values(data);
+  return result[0].insertId;
+}
+
+export async function getVideoJobsByBriefId(briefId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  return db
+    .select()
+    .from(videoJobs)
+    .where(eq(videoJobs.briefId, briefId))
+    .orderBy(videoJobs.segmentIndex);
+}
+
+export async function getVideoJobById(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.select().from(videoJobs).where(eq(videoJobs.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function updateVideoJob(id: number, data: Partial<Pick<InsertVideoJob, "status" | "wavespeedTaskId" | "videoUrl" | "errorMessage">>) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.update(videoJobs).set(data).where(eq(videoJobs.id, id));
+}
+
+export async function getVideoJobByBriefAndSegment(briefId: number, segmentIndex: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db
+    .select()
+    .from(videoJobs)
+    .where(and(eq(videoJobs.briefId, briefId), eq(videoJobs.segmentIndex, segmentIndex)))
+    .limit(1);
   return result.length > 0 ? result[0] : null;
 }

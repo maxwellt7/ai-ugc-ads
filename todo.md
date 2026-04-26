@@ -16,3 +16,16 @@
 - [x] Navigation: landing page → intake form → results → history
 - [x] Auth fix: handle stale cookies from other Manus projects (appId mismatch check)
 - [x] Vitest tests: 14 tests covering brief router procedures
+
+## Seedance 2.0 Video Generation Integration
+- [x] Add video_jobs table to database schema for tracking generation tasks
+- [x] Create server-side WaveSpeed API client (submitVideoTask, getVideoTaskResult)
+- [x] Add tRPC routes: video.generate, video.generateAll, video.checkStatus, video.listByBrief
+- [x] Add "Generate Video" button per segment on the BriefResult page
+- [x] Add "Generate All Videos" button to generate all segments at once
+- [x] Build real-time status polling UI using tRPC refetchInterval (pending → created → processing → completed/failed)
+- [x] Display video player inline when generation succeeds with download link
+- [x] Store video URLs in database for persistence (verified via updateVideoJob test)
+- [x] Use 9:16 aspect ratio for UGC video ads
+- [x] Write vitest tests for video generation routes (10 tests including polling and error scenarios)
+- [x] WaveSpeed API key validation tests (2 tests)
