@@ -46,7 +46,7 @@ export async function submitVideoTask(params: WavespeedSubmitParams): Promise<Wa
     prompt: params.prompt,
     aspect_ratio: params.aspectRatio || "9:16",
     resolution: params.resolution || "720p",
-    duration: params.duration || 5,
+    duration: params.duration || 15,
     enable_web_search: false,
   };
 

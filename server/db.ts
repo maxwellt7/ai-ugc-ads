@@ -1,6 +1,6 @@
 import { desc, eq, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, briefs, InsertBrief, videoJobs, InsertVideoJob } from "../drizzle/schema";
+import { InsertUser, users, briefs, InsertBrief, videoJobs, InsertVideoJob, stitchJobs, InsertStitchJob } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -170,4 +170,42 @@ export async function getVideoJobByBriefAndSegment(briefId: number, segmentIndex
     .where(and(eq(videoJobs.briefId, briefId), eq(videoJobs.segmentIndex, segmentIndex)))
     .limit(1);
   return result.length > 0 ? result[0] : null;
+}
+
+// Stitch job helpers
+
+export async function createStitchJob(data: InsertStitchJob) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(stitchJobs).values(data);
+  return result[0].insertId;
+}
+
+export async function getStitchJobById(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.select().from(stitchJobs).where(eq(stitchJobs.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getStitchJobByBriefId(briefId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db
+    .select()
+    .from(stitchJobs)
+    .where(eq(stitchJobs.briefId, briefId))
+    .orderBy(desc(stitchJobs.createdAt))
+    .limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function updateStitchJob(id: number, data: Partial<Pick<InsertStitchJob, "status" | "shotstackRenderId" | "finalVideoUrl" | "errorMessage">>) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.update(stitchJobs).set(data).where(eq(stitchJobs.id, id));
 }

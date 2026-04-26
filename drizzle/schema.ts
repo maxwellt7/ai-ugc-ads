@@ -56,3 +56,20 @@ export const videoJobs = mysqlTable("video_jobs", {
 
 export type VideoJob = typeof videoJobs.$inferSelect;
 export type InsertVideoJob = typeof videoJobs.$inferInsert;
+
+export const stitchJobs = mysqlTable("stitch_jobs", {
+  id: int("id").autoincrement().primaryKey(),
+  briefId: int("briefId").notNull(),
+  userId: int("userId").notNull(),
+  shotstackRenderId: varchar("shotstackRenderId", { length: 255 }),
+  status: mysqlEnum("status", ["pending", "queued", "fetching", "rendering", "saving", "done", "failed"]).default("pending").notNull(),
+  finalVideoUrl: text("finalVideoUrl"),
+  errorMessage: text("errorMessage"),
+  segmentCount: int("segmentCount").notNull(),
+  aspectRatio: varchar("aspectRatio", { length: 20 }).default("9:16").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type StitchJob = typeof stitchJobs.$inferSelect;
+export type InsertStitchJob = typeof stitchJobs.$inferInsert;

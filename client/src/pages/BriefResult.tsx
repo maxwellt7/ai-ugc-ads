@@ -4,7 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import { useLocation, useParams } from "wouter";
 import { useMemo, useEffect, useRef } from "react";
-import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle } from "lucide-react";
+import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle, Scissors, Clapperboard } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 import { Streamdown } from "streamdown";
@@ -102,6 +102,7 @@ export default function BriefResult() {
   const [videoJobs, setVideoJobs] = useState<Map<number, VideoJobState>>(new Map());
   const [generatingSegment, setGeneratingSegment] = useState<number | null>(null);
   const [generatingAll, setGeneratingAll] = useState(false);
+  const [stitching, setStitching] = useState(false);
 
   const { data: brief, isLoading } = trpc.brief.getById.useQuery(
     { id: briefId },
@@ -140,7 +141,39 @@ export default function BriefResult() {
 
   const generateMutation = trpc.video.generate.useMutation();
   const generateAllMutation = trpc.video.generateAll.useMutation();
+  const stitchCreateMutation = trpc.stitch.create.useMutation();
   const utils = trpc.useUtils();
+
+  // Load existing stitch job for this brief
+  const { data: existingStitchJob, refetch: refetchStitch } = trpc.stitch.getByBrief.useQuery(
+    { briefId },
+    { enabled: briefId > 0 && isAuthenticated }
+  );
+
+  // Determine if stitch job needs polling
+  const stitchNeedsPolling = existingStitchJob &&
+    existingStitchJob.status !== "done" &&
+    existingStitchJob.status !== "failed";
+
+  // Poll stitch status via tRPC
+  const { data: stitchStatusData } = trpc.stitch.checkStatus.useQuery(
+    { stitchJobId: existingStitchJob?.id ?? 0 },
+    {
+      enabled: !!stitchNeedsPolling && !!existingStitchJob?.id,
+      refetchInterval: (query) => {
+        const status = query.state.data?.status;
+        if (status === "done" || status === "failed") return false;
+        return 5000;
+      },
+    }
+  );
+
+  // When stitch polling completes, refetch the main stitch query
+  useEffect(() => {
+    if (stitchStatusData && (stitchStatusData.status === "done" || stitchStatusData.status === "failed")) {
+      refetchStitch();
+    }
+  }, [stitchStatusData, refetchStitch]);
 
   // Callback for when a poller updates a job state
   const handleJobUpdate = (state: VideoJobState) => {
@@ -179,7 +212,7 @@ export default function BriefResult() {
         briefId,
         segmentIndex,
         prompt,
-        duration: 5,
+        duration: 15,
       });
 
       setVideoJobs((prev) => {
@@ -215,7 +248,7 @@ export default function BriefResult() {
       const result = await generateAllMutation.mutateAsync({
         briefId,
         segments: segmentInputs,
-        duration: 5,
+        duration: 15,
       });
 
       for (const r of result.results) {
@@ -323,6 +356,45 @@ export default function BriefResult() {
     const job = videoJobs.get(i);
     return job && (job.status === "created" || job.status === "processing" || job.status === "completed");
   });
+
+  const allSegmentsCompleted = segments.length > 0 && segments.every((_, i) => {
+    const job = videoJobs.get(i);
+    return job && job.status === "completed";
+  });
+
+  const canStitch = allSegmentsCompleted && !existingStitchJob;
+  const stitchInProgress = existingStitchJob &&
+    existingStitchJob.status !== "done" &&
+    existingStitchJob.status !== "failed";
+  const stitchDone = existingStitchJob?.status === "done";
+  const stitchFailed = existingStitchJob?.status === "failed";
+
+  const handleStitch = async () => {
+    setStitching(true);
+    try {
+      await stitchCreateMutation.mutateAsync({ briefId });
+      toast.success("Video stitching started! This may take 1-2 minutes.");
+      refetchStitch();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to start stitching";
+      toast.error(msg);
+    } finally {
+      setStitching(false);
+    }
+  };
+
+  const stitchStatusLabel = (status: string) => {
+    const labels: Record<string, { label: string; color: string }> = {
+      pending: { label: "PENDING", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40" },
+      queued: { label: "QUEUED", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40" },
+      fetching: { label: "FETCHING CLIPS", color: "bg-blue-500/20 text-blue-400 border-blue-500/40" },
+      rendering: { label: "RENDERING", color: "bg-purple-500/20 text-purple-400 border-purple-500/40" },
+      saving: { label: "SAVING", color: "bg-cyan-500/20 text-cyan-400 border-cyan-500/40" },
+      done: { label: "COMPLETE", color: "bg-green-500/20 text-green-400 border-green-500/40" },
+      failed: { label: "FAILED", color: "bg-red-500/20 text-red-400 border-red-500/40" },
+    };
+    return labels[status] || labels.pending;
+  };
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
@@ -539,7 +611,7 @@ export default function BriefResult() {
                           <Film className="absolute inset-0 m-auto w-6 h-6 text-primary" />
                         </div>
                         <span className="font-sans text-xs text-muted-foreground uppercase tracking-widest">
-                          Generating video... this may take 1-3 minutes
+                          Generating 15s video... this may take 2-5 minutes
                         </span>
                       </div>
                     )}
@@ -557,6 +629,106 @@ export default function BriefResult() {
                 );
               })}
             </div>
+          </section>
+        )}
+
+        {/* Stitch Final Ad Section */}
+        {(canStitch || existingStitchJob) && (
+          <section className="mb-10">
+            <div className="brutal-divider mb-10" />
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="font-display text-2xl tracking-wider uppercase">
+                FINAL <span className="text-primary">AD</span>
+              </h2>
+              {canStitch && (
+                <Button
+                  onClick={handleStitch}
+                  disabled={stitching}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs px-5 h-10"
+                >
+                  {stitching ? (
+                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> SUBMITTING...</>
+                  ) : (
+                    <><Scissors className="w-4 h-4 mr-2" /> STITCH FINAL AD</>
+                  )}
+                </Button>
+              )}
+              {stitchFailed && !canStitch && (
+                <Button
+                  onClick={handleStitch}
+                  disabled={stitching}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs px-5 h-10"
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" /> RETRY STITCH
+                </Button>
+              )}
+            </div>
+
+            {/* Stitch in progress */}
+            {stitchInProgress && (
+              <div className="border border-border p-8 flex flex-col items-center gap-4">
+                <div className="relative w-20 h-20">
+                  <div className="absolute inset-0 border-2 border-primary/20 border-t-primary animate-spin" style={{ borderRadius: 0 }} />
+                  <Clapperboard className="absolute inset-0 m-auto w-8 h-8 text-primary" />
+                </div>
+                <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-sans uppercase tracking-widest border ${stitchStatusLabel(existingStitchJob?.status || "pending").color}`}>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {stitchStatusLabel(existingStitchJob?.status || "pending").label}
+                </span>
+                <span className="font-sans text-xs text-muted-foreground uppercase tracking-widest">
+                  Stitching {existingStitchJob?.segmentCount || segments.length} segments into final ad... this may take 1-2 minutes
+                </span>
+              </div>
+            )}
+
+            {/* Stitch complete — show final video */}
+            {stitchDone && existingStitchJob?.finalVideoUrl && (
+              <div className="border border-border">
+                <div className="flex items-center justify-between p-4 border-b border-border bg-secondary/30">
+                  <div className="flex items-center gap-3">
+                    <Clapperboard className="w-5 h-5 text-primary" />
+                    <span className="font-display text-lg tracking-wider uppercase">FINAL STITCHED AD</span>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-sans uppercase tracking-widest border bg-green-500/20 text-green-400 border-green-500/40">
+                      <Check className="w-3 h-3" /> COMPLETE
+                    </span>
+                  </div>
+                  <a
+                    href={existingStitchJob.finalVideoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-sans uppercase tracking-widest bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                  >
+                    <Download className="w-3 h-3" /> DOWNLOAD FINAL AD
+                  </a>
+                </div>
+                <div className="p-6 bg-secondary/10">
+                  <div className="relative w-full max-w-[320px] mx-auto aspect-[9/16] bg-black border border-border">
+                    <video
+                      src={existingStitchJob.finalVideoUrl}
+                      controls
+                      className="w-full h-full object-contain"
+                      playsInline
+                    />
+                  </div>
+                  <p className="text-center mt-4 font-sans text-xs text-muted-foreground uppercase tracking-widest">
+                    {existingStitchJob.segmentCount} segments · {(existingStitchJob.segmentCount || 0) * 15}s total
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Stitch failed */}
+            {stitchFailed && existingStitchJob?.errorMessage && (
+              <div className="border border-red-500/30 p-4 bg-red-500/5">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-sans text-xs text-red-400 uppercase tracking-widest block mb-1">Stitch Failed</span>
+                    <span className="font-mono text-xs text-red-400">{existingStitchJob.errorMessage}</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
 

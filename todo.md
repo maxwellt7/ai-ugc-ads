@@ -29,3 +29,18 @@
 - [x] Use 9:16 aspect ratio for UGC video ads
 - [x] Write vitest tests for video generation routes (10 tests including polling and error scenarios)
 - [x] WaveSpeed API key validation tests (2 tests)
+
+## Shotstack Video Stitching Integration
+- [x] Request and validate Shotstack API key
+- [x] Create Shotstack API client (submitRender, getRenderStatus)
+- [x] Add stitch_jobs table to database schema for tracking render tasks
+- [x] Add tRPC routes: stitch.create, stitch.checkStatus, stitch.getByBrief
+- [x] Build JSON edit payload: sequential clips with fade transitions, 9:16 output
+- [x] Add "Stitch Final Ad" button on BriefResult page (appears when all segments have videos)
+- [x] Build real-time status polling UI for render progress
+- [x] Display final stitched video with inline player and download button
+- [x] Store final video URL in database for persistence
+- [x] Write vitest tests for stitch routes (12 tests covering create, checkStatus, getByBrief, and buildStitchEdit)
+
+## Bug Fixes
+- [x] Fix video duration from 5s to 15s (each segment should be 15 seconds, not 5)

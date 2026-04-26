@@ -8,4 +8,5 @@ export const ENV = {
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
   wavespeedApiKey: process.env.WAVESPEED_API_KEY ?? "",
+  shotstackApiKey: process.env.SHOTSTACK_API_KEY ?? "",
 };

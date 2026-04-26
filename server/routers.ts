@@ -4,8 +4,9 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { invokeLLM } from "./_core/llm";
 import { notifyOwner } from "./_core/notification";
-import { createBrief, getBriefsByUserId, getBriefById, createVideoJob, getVideoJobsByBriefId, getVideoJobById, updateVideoJob, getVideoJobByBriefAndSegment } from "./db";
+import { createBrief, getBriefsByUserId, getBriefById, createVideoJob, getVideoJobsByBriefId, getVideoJobById, updateVideoJob, getVideoJobByBriefAndSegment, createStitchJob, getStitchJobById, getStitchJobByBriefId, updateStitchJob } from "./db";
 import { submitVideoTask, getVideoTaskResult } from "./wavespeed";
+import { buildStitchEdit, submitShotstackRender, getShotstackRenderStatus } from "./shotstack";
 import { storagePut } from "./storage";
 import { z } from "zod";
 
@@ -353,7 +354,7 @@ export const appRouter = router({
           status: "pending",
           aspectRatio: "9:16",
           resolution: "720p",
-          duration: input.duration || 5,
+          duration: input.duration || 15,
         });
 
         // Submit to WaveSpeed API
@@ -362,7 +363,7 @@ export const appRouter = router({
             prompt: input.prompt,
             aspectRatio: "9:16",
             resolution: "720p",
-            duration: input.duration || 5,
+            duration: input.duration || 15,
             referenceImages: input.referenceImages,
           });
 
@@ -419,7 +420,7 @@ export const appRouter = router({
             status: "pending",
             aspectRatio: "9:16",
             resolution: "720p",
-            duration: input.duration || 5,
+            duration: input.duration || 15,
           });
 
           try {
@@ -427,7 +428,7 @@ export const appRouter = router({
               prompt: seg.prompt,
               aspectRatio: "9:16",
               resolution: "720p",
-              duration: input.duration || 5,
+              duration: input.duration || 15,
               referenceImages: input.referenceImages,
             });
 
@@ -532,6 +533,169 @@ export const appRouter = router({
           duration: j.duration,
           createdAt: j.createdAt,
         }));
+      }),
+  }),
+
+  stitch: router({
+    create: protectedProcedure
+      .input(
+        z.object({
+          briefId: z.number(),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        // Get all completed video jobs for this brief
+        const videoJobs = await getVideoJobsByBriefId(input.briefId);
+        const completedJobs = videoJobs
+          .filter((j) => j.status === "completed" && j.videoUrl)
+          .sort((a, b) => a.segmentIndex - b.segmentIndex);
+
+        if (completedJobs.length === 0) {
+          throw new Error("No completed video segments to stitch");
+        }
+
+        // Build the segment video list for Shotstack
+        const segmentVideos = completedJobs.map((j) => ({
+          url: j.videoUrl!,
+          duration: j.duration || 15,
+        }));
+
+        // Create the stitch job record
+        const stitchJobId = await createStitchJob({
+          briefId: input.briefId,
+          userId: ctx.user.id,
+          segmentCount: completedJobs.length,
+          status: "pending",
+          aspectRatio: "9:16",
+        });
+
+        try {
+          // Build the Shotstack edit JSON and submit
+          const edit = buildStitchEdit(segmentVideos, "9:16");
+          const renderResponse = await submitShotstackRender(edit);
+
+          await updateStitchJob(stitchJobId, {
+            shotstackRenderId: renderResponse.response.id,
+            status: "queued",
+          });
+
+          return {
+            stitchJobId,
+            shotstackRenderId: renderResponse.response.id,
+            status: "queued",
+            segmentCount: completedJobs.length,
+          };
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : "Unknown error";
+          await updateStitchJob(stitchJobId, {
+            status: "failed",
+            errorMessage: errMsg,
+          });
+          throw new Error("Failed to submit stitch render: " + errMsg);
+        }
+      }),
+
+    checkStatus: protectedProcedure
+      .input(z.object({ stitchJobId: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const job = await getStitchJobById(input.stitchJobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new Error("Stitch job not found or access denied");
+        }
+
+        // If already done or failed, return cached result
+        if (job.status === "done" || job.status === "failed") {
+          return {
+            id: job.id,
+            status: job.status,
+            finalVideoUrl: job.finalVideoUrl,
+            errorMessage: job.errorMessage,
+          };
+        }
+
+        // Poll Shotstack API for status update
+        if (job.shotstackRenderId) {
+          try {
+            const result = await getShotstackRenderStatus(job.shotstackRenderId);
+            const ssStatus = result.response.status;
+
+            if (ssStatus === "done") {
+              await updateStitchJob(job.id, {
+                status: "done",
+                finalVideoUrl: result.response.url || null,
+              });
+              return {
+                id: job.id,
+                status: "done" as const,
+                finalVideoUrl: result.response.url || null,
+                errorMessage: null,
+              };
+            } else if (ssStatus === "failed") {
+              const errMsg = result.response.error || "Shotstack render failed";
+              await updateStitchJob(job.id, {
+                status: "failed",
+                errorMessage: errMsg,
+              });
+              return {
+                id: job.id,
+                status: "failed" as const,
+                finalVideoUrl: null,
+                errorMessage: errMsg,
+              };
+            } else {
+              // Still in progress — update status
+              const mappedStatus = ssStatus as "queued" | "fetching" | "rendering" | "saving";
+              await updateStitchJob(job.id, { status: mappedStatus });
+              return {
+                id: job.id,
+                status: mappedStatus,
+                finalVideoUrl: null,
+                errorMessage: null,
+              };
+            }
+          } catch {
+            // If polling fails, return current cached status
+            return {
+              id: job.id,
+              status: job.status,
+              finalVideoUrl: job.finalVideoUrl,
+              errorMessage: job.errorMessage,
+            };
+          }
+        }
+
+        return {
+          id: job.id,
+          status: job.status,
+          finalVideoUrl: job.finalVideoUrl,
+          errorMessage: job.errorMessage,
+        };
+      }),
+
+    getByBrief: protectedProcedure
+      .input(z.object({ briefId: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        const job = await getStitchJobByBriefId(input.briefId);
+        if (!job) return null;
+
+        return {
+          id: job.id,
+          status: job.status,
+          finalVideoUrl: job.finalVideoUrl,
+          errorMessage: job.errorMessage,
+          segmentCount: job.segmentCount,
+          createdAt: job.createdAt,
+        };
       }),
   }),
 });

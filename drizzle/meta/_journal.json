@@ -22,6 +22,13 @@
       "when": 1777233597994,
       "tag": "0002_smart_fat_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1777244082118,
+      "tag": "0003_natural_tiger_shark",
+      "breakpoints": true
     }
   ]
 }
