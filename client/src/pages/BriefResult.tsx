@@ -4,7 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import { useLocation, useParams } from "wouter";
 import { useMemo, useEffect, useRef, useCallback } from "react";
-import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle, Scissors, Clapperboard, MessageSquare, Send } from "lucide-react";
+import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle, Scissors, Clapperboard, MessageSquare, Send, Upload, Pencil, Save, X, User } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 import { Streamdown } from "streamdown";
@@ -112,7 +112,17 @@ export default function BriefResult() {
   const [feedbackOpen, setFeedbackOpen] = useState<Set<number>>(new Set());
   const [regenerating, setRegenerating] = useState<number | null>(null);
 
-  const { data: brief, isLoading } = trpc.brief.getById.useQuery(
+  // Creator image state
+  const [creatorImageUrl, setCreatorImageUrl] = useState<string | null>(null);
+  const [creatorImagePreview, setCreatorImagePreview] = useState<string | null>(null);
+  const [isUploadingCreator, setIsUploadingCreator] = useState(false);
+
+  // Editable brief state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedBriefText, setEditedBriefText] = useState("");
+  const [isSavingBrief, setIsSavingBrief] = useState(false);
+
+  const { data: brief, isLoading, refetch: refetchBrief } = trpc.brief.getById.useQuery(
     { id: briefId },
     { enabled: briefId > 0 && isAuthenticated }
   );
@@ -144,20 +154,41 @@ export default function BriefResult() {
     }
   }, [existingJobs]);
 
+  // Initialize creator image from brief data
+  useEffect(() => {
+    if (brief?.creatorImageUrl) {
+      setCreatorImageUrl(brief.creatorImageUrl);
+      setCreatorImagePreview(brief.creatorImageUrl);
+    }
+  }, [brief?.creatorImageUrl]);
+
+  // Initialize edited brief text
+  useEffect(() => {
+    if (brief) {
+      setEditedBriefText(brief.editedBrief || brief.generatedBrief);
+    }
+  }, [brief]);
+
+  // The "active" brief content — use editedBrief if available, otherwise generatedBrief
+  const activeBriefContent = brief?.editedBrief || brief?.generatedBrief || "";
+
   const segments = useMemo(() => {
-    if (!brief?.generatedBrief) return [];
-    const parsed = extractSegmentPrompts(brief.generatedBrief);
+    if (!activeBriefContent) return [];
+    const parsed = extractSegmentPrompts(activeBriefContent);
     // Enforce segment count: only return the number of segments the user requested
-    if (brief.segmentCount && parsed.length > brief.segmentCount) {
+    if (brief?.segmentCount && parsed.length > brief.segmentCount) {
       return parsed.slice(0, brief.segmentCount);
     }
     return parsed;
-  }, [brief?.generatedBrief, brief?.segmentCount]);
+  }, [activeBriefContent, brief?.segmentCount]);
 
   const generateMutation = trpc.video.generate.useMutation();
   const generateAllMutation = trpc.video.generateAll.useMutation();
   const regenerateMutation = trpc.video.regenerate.useMutation();
   const stitchCreateMutation = trpc.stitch.create.useMutation();
+  const uploadMutation = trpc.brief.uploadImage.useMutation();
+  const updateCreatorImageMutation = trpc.brief.updateCreatorImage.useMutation();
+  const updateBriefMutation = trpc.brief.update.useMutation();
   const utils = trpc.useUtils();
 
   // Load existing stitch job for this brief
@@ -219,6 +250,82 @@ export default function BriefResult() {
     return result;
   }, [videoJobs]);
 
+  // Creator image upload handler
+  const handleCreatorImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Image must be under 5MB");
+      return;
+    }
+
+    setIsUploadingCreator(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = (reader.result as string).split(",")[1];
+        setCreatorImagePreview(reader.result as string);
+
+        const result = await uploadMutation.mutateAsync({
+          fileName: "creator-" + file.name,
+          fileBase64: base64,
+          contentType: file.type,
+        });
+
+        const fullUrl = window.location.origin + result.url;
+        setCreatorImageUrl(fullUrl);
+
+        // Save to brief
+        await updateCreatorImageMutation.mutateAsync({
+          id: briefId,
+          creatorImageUrl: fullUrl,
+        });
+
+        toast.success("Creator reference image saved — it will be used for all video segments");
+        setIsUploadingCreator(false);
+      };
+      reader.readAsDataURL(file);
+    } catch {
+      toast.error("Upload failed");
+      setIsUploadingCreator(false);
+    }
+  };
+
+  const removeCreatorImage = async () => {
+    setCreatorImageUrl(null);
+    setCreatorImagePreview(null);
+    // Note: we don't clear from DB since there's no "null" update path, but the UI won't pass it
+  };
+
+  // Brief editing handlers
+  const handleStartEditing = () => {
+    setEditedBriefText(activeBriefContent);
+    setIsEditing(true);
+  };
+
+  const handleSaveBrief = async () => {
+    setIsSavingBrief(true);
+    try {
+      await updateBriefMutation.mutateAsync({
+        id: briefId,
+        editedBrief: editedBriefText,
+      });
+      setIsEditing(false);
+      refetchBrief();
+      toast.success("Brief saved! Video prompts will use your edited version.");
+    } catch {
+      toast.error("Failed to save brief");
+    } finally {
+      setIsSavingBrief(false);
+    }
+  };
+
+  const handleCancelEditing = () => {
+    setEditedBriefText(activeBriefContent);
+    setIsEditing(false);
+  };
+
   const handleGenerateSegment = async (segmentIndex: number, prompt: string) => {
     setGeneratingSegment(segmentIndex);
     try {
@@ -227,6 +334,7 @@ export default function BriefResult() {
         segmentIndex,
         prompt,
         duration: 15,
+        referenceImages: creatorImageUrl ? [creatorImageUrl] : undefined,
       });
 
       setVideoJobs((prev) => {
@@ -263,6 +371,7 @@ export default function BriefResult() {
         briefId,
         segments: segmentInputs,
         duration: 15,
+        referenceImages: creatorImageUrl ? [creatorImageUrl] : undefined,
       });
 
       for (const r of result.results) {
@@ -302,6 +411,7 @@ export default function BriefResult() {
         originalPrompt,
         feedback: fb.trim(),
         duration: 15,
+        referenceImages: creatorImageUrl ? [creatorImageUrl] : undefined,
       });
 
       setVideoJobs((prev) => {
@@ -363,9 +473,9 @@ export default function BriefResult() {
   };
 
   const copyAll = async () => {
-    if (!brief?.generatedBrief) return;
+    if (!activeBriefContent) return;
     try {
-      await navigator.clipboard.writeText(brief.generatedBrief);
+      await navigator.clipboard.writeText(activeBriefContent);
       setCopiedAll(true);
       toast.success("Full brief copied!");
       setTimeout(() => setCopiedAll(false), 2000);
@@ -375,12 +485,12 @@ export default function BriefResult() {
   };
 
   const downloadBrief = () => {
-    if (!brief?.generatedBrief) return;
-    const blob = new Blob([brief.generatedBrief], { type: "text/plain;charset=utf-8" });
+    if (!activeBriefContent) return;
+    const blob = new Blob([activeBriefContent], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = (brief.productName.replace(/\s+/g, "_") + "_UGC_Brief.txt");
+    a.download = (brief!.productName.replace(/\s+/g, "_") + "_UGC_Brief.txt");
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -550,7 +660,77 @@ export default function BriefResult() {
             >
               <Download className="w-3 h-3 mr-2" /> DOWNLOAD BRIEF
             </Button>
+            {!isEditing && (
+              <Button
+                onClick={handleStartEditing}
+                variant="outline"
+                className="border-border text-foreground hover:bg-primary hover:text-primary-foreground font-sans uppercase tracking-widest text-xs h-10 px-4"
+              >
+                <Pencil className="w-3 h-3 mr-2" /> EDIT BRIEF
+              </Button>
+            )}
           </div>
+
+          {brief.editedBrief && (
+            <p className="mt-3 text-xs text-primary font-sans uppercase tracking-widest flex items-center gap-2">
+              <Pencil className="w-3 h-3" /> Using edited version
+            </p>
+          )}
+        </section>
+
+        <div className="brutal-divider mb-10" />
+
+        {/* Creator Reference Image — Avatar Anchoring */}
+        <section className="mb-10">
+          <h2 className="font-display text-2xl tracking-wider uppercase mb-4">
+            CREATOR <span className="text-primary">REFERENCE</span>
+          </h2>
+          <p className="text-muted-foreground font-sans text-xs uppercase tracking-widest mb-4">
+            Upload ONE creator reference image — this person will appear consistently across ALL video segments
+          </p>
+
+          {!creatorImagePreview ? (
+            <label className="flex items-center gap-4 border-2 border-dashed border-border hover:border-primary/50 transition-colors p-6 cursor-pointer group max-w-md">
+              <div className="w-16 h-16 border border-border group-hover:border-primary flex items-center justify-center flex-shrink-0 transition-colors">
+                <User className="w-8 h-8 text-muted-foreground group-hover:text-primary transition-colors" />
+              </div>
+              <div>
+                <span className="font-sans text-sm text-muted-foreground group-hover:text-foreground transition-colors uppercase tracking-widest block">
+                  {isUploadingCreator ? "Uploading..." : "Upload creator image"}
+                </span>
+                <span className="font-sans text-xs text-muted-foreground/50 mt-1 block">
+                  This becomes the anchor avatar for Seedance
+                </span>
+              </div>
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleCreatorImageUpload}
+                className="hidden"
+                disabled={isUploadingCreator}
+              />
+            </label>
+          ) : (
+            <div className="flex items-start gap-4 max-w-md">
+              <div className="relative w-24 h-24 border border-border flex-shrink-0">
+                <img src={creatorImagePreview} alt="Creator reference" className="w-full h-full object-cover" />
+                <button
+                  onClick={removeCreatorImage}
+                  className="absolute -top-2 -right-2 w-6 h-6 bg-background border border-border flex items-center justify-center hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+              <div className="pt-2">
+                <span className="font-sans text-xs uppercase tracking-widest text-green-400 flex items-center gap-2">
+                  <Check className="w-3 h-3" /> ANCHOR AVATAR SET
+                </span>
+                <p className="font-sans text-xs text-muted-foreground mt-1">
+                  This image will be passed as a reference to WaveSpeed for every segment, ensuring visual consistency.
+                </p>
+              </div>
+            </div>
+          )}
         </section>
 
         <div className="brutal-divider mb-10" />
@@ -606,6 +786,15 @@ export default function BriefResult() {
                 </Button>
               )}
             </div>
+
+            {creatorImageUrl && (
+              <div className="mb-4 p-3 border border-green-500/30 bg-green-500/5 flex items-center gap-3">
+                <User className="w-4 h-4 text-green-400 flex-shrink-0" />
+                <span className="font-sans text-xs text-green-400 uppercase tracking-widest">
+                  Creator reference image will be passed to all segments for consistent avatar
+                </span>
+              </div>
+            )}
 
             <div className="space-y-6">
               {segments.map((seg, i) => {
@@ -873,14 +1062,55 @@ export default function BriefResult() {
 
         <div className="brutal-divider mb-10" />
 
-        {/* Full Brief (rendered markdown) */}
+        {/* Full Brief — editable or rendered */}
         <section className="mb-10">
-          <h2 className="font-display text-2xl tracking-wider uppercase mb-6">
-            FULL <span className="text-primary">BRIEF</span>
-          </h2>
-          <div className="border border-border p-6 prose prose-invert prose-sm max-w-none font-sans [&_h1]:font-display [&_h1]:tracking-wider [&_h2]:font-display [&_h2]:tracking-wider [&_h3]:font-display [&_h3]:tracking-wider [&_code]:font-mono [&_pre]:bg-secondary [&_pre]:border [&_pre]:border-border [&_a]:text-primary [&_a]:no-underline [&_a:hover]:underline [&_strong]:text-foreground [&_hr]:border-primary [&_hr]:border-t-2">
-            <Streamdown>{brief.generatedBrief}</Streamdown>
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="font-display text-2xl tracking-wider uppercase">
+              FULL <span className="text-primary">BRIEF</span>
+            </h2>
+            {isEditing && (
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={handleCancelEditing}
+                  variant="outline"
+                  size="sm"
+                  className="border-border text-foreground hover:bg-secondary font-sans uppercase tracking-widest text-xs"
+                >
+                  <X className="w-3 h-3 mr-1" /> CANCEL
+                </Button>
+                <Button
+                  onClick={handleSaveBrief}
+                  disabled={isSavingBrief}
+                  size="sm"
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs"
+                >
+                  {isSavingBrief ? (
+                    <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> SAVING...</>
+                  ) : (
+                    <><Save className="w-3 h-3 mr-1" /> SAVE BRIEF</>
+                  )}
+                </Button>
+              </div>
+            )}
           </div>
+
+          {isEditing ? (
+            <div className="border border-primary/50 p-1">
+              <Textarea
+                value={editedBriefText}
+                onChange={(e) => setEditedBriefText(e.target.value)}
+                rows={30}
+                className="bg-input border-none text-foreground font-mono text-xs leading-relaxed px-4 py-3 resize-y min-h-[400px] w-full"
+              />
+              <p className="px-4 py-2 text-xs text-muted-foreground font-sans">
+                Edit the brief above. The segment prompts (inside ``` code blocks) are what get sent to Seedance for video generation.
+              </p>
+            </div>
+          ) : (
+            <div className="border border-border p-6 prose prose-invert prose-sm max-w-none font-sans [&_h1]:font-display [&_h1]:tracking-wider [&_h2]:font-display [&_h2]:tracking-wider [&_h3]:font-display [&_h3]:tracking-wider [&_code]:font-mono [&_pre]:bg-secondary [&_pre]:border [&_pre]:border-border [&_a]:text-primary [&_a]:no-underline [&_a:hover]:underline [&_strong]:text-foreground [&_hr]:border-primary [&_hr]:border-t-2">
+              <Streamdown>{activeBriefContent}</Streamdown>
+            </div>
+          )}
         </section>
 
         {/* Back */}

@@ -109,6 +109,7 @@ vi.mock("./db", async () => {
       pinterestLinks: "[]",
       createdAt: new Date(),
     }),
+    updateBrief: vi.fn().mockResolvedValue(undefined),
   };
 });
 

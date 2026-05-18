@@ -83,6 +83,9 @@ vi.mock("./db", () => ({
   }),
   getUserByOpenId: vi.fn(),
   upsertUser: vi.fn(),
+  updateBrief: vi.fn().mockResolvedValue(undefined),
+  getVideoSummaryByBriefIds: vi.fn().mockResolvedValue([]),
+  getStitchSummaryByBriefIds: vi.fn().mockResolvedValue([]),
 }));
 
 // Mock the LLM module
@@ -301,5 +304,133 @@ describe("brief.analyzeImage", () => {
     await expect(
       caller.brief.analyzeImage({ imageUrl: "https://example.com/img.png" })
     ).rejects.toThrow();
+  });
+});
+
+describe("brief.update", () => {
+  it("requires authentication", async () => {
+    const { ctx } = createUnauthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.brief.update({ id: 1, editedBrief: "Updated brief content" })
+    ).rejects.toThrow();
+  });
+
+  it("updates the brief with edited content", async () => {
+    const { ctx } = createAuthContext(1);
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.brief.update({
+      id: 1,
+      editedBrief: "# Edited Brief\n\nNew content here",
+    });
+
+    expect(result.success).toBe(true);
+
+    const { updateBrief } = await import("./db");
+    expect(updateBrief).toHaveBeenCalledWith(1, {
+      editedBrief: "# Edited Brief\n\nNew content here",
+    });
+  });
+
+  it("rejects when brief belongs to another user", async () => {
+    const { ctx } = createAuthContext(999);
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.brief.update({ id: 1, editedBrief: "Hacked content" })
+    ).rejects.toThrow("Brief not found or access denied");
+  });
+
+  it("rejects when brief does not exist", async () => {
+    const { ctx } = createAuthContext(1);
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.brief.update({ id: 999, editedBrief: "Content" })
+    ).rejects.toThrow("Brief not found or access denied");
+  });
+});
+
+describe("brief.updateCreatorImage", () => {
+  it("requires authentication", async () => {
+    const { ctx } = createUnauthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.brief.updateCreatorImage({ id: 1, creatorImageUrl: "https://example.com/img.png" })
+    ).rejects.toThrow();
+  });
+
+  it("updates the creator image URL on the brief", async () => {
+    const { ctx } = createAuthContext(1);
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.brief.updateCreatorImage({
+      id: 1,
+      creatorImageUrl: "https://example.com/creator.png",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.creatorImageUrl).toBe("https://example.com/creator.png");
+
+    const { updateBrief } = await import("./db");
+    expect(updateBrief).toHaveBeenCalledWith(1, {
+      creatorImageUrl: "https://example.com/creator.png",
+    });
+  });
+
+  it("rejects when brief belongs to another user", async () => {
+    const { ctx } = createAuthContext(999);
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.brief.updateCreatorImage({ id: 1, creatorImageUrl: "https://example.com/img.png" })
+    ).rejects.toThrow("Brief not found or access denied");
+  });
+});
+
+describe("brief.generate with intakeMode", () => {
+  it("accepts intakeMode=script and generates a brief", async () => {
+    const { ctx } = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.brief.generate({
+      productName: "TestProduct",
+      productDescription: "A test product",
+      targetAudienceAge: "25-35",
+      targetAudienceGender: "Female",
+      targetAudienceLifestyle: "Health-conscious",
+      adGoal: "awareness",
+      toneVibe: "casual",
+      segmentCount: 2,
+      scriptConcept: "[HOOK] Hey check this out\n[PROBLEM] I used to struggle with...\n[CTA] Link in bio",
+      intakeMode: "script",
+    });
+
+    expect(result.briefId).toBe(42);
+    expect(result.generatedBrief).toContain("Director's Brief");
+  });
+
+  it("accepts intakeMode=description (default behavior)", async () => {
+    const { ctx } = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.brief.generate({
+      productName: "TestProduct",
+      productDescription: "A test product",
+      targetAudienceAge: "25-35",
+      targetAudienceGender: "Female",
+      targetAudienceLifestyle: "Health-conscious",
+      adGoal: "awareness",
+      toneVibe: "casual",
+      segmentCount: 2,
+      scriptConcept: "Show someone discovering the product",
+      intakeMode: "description",
+    });
+
+    expect(result.briefId).toBe(42);
+    expect(result.generatedBrief).toContain("Director's Brief");
   });
 });

@@ -9,8 +9,10 @@ import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import { useLocation } from "wouter";
 import { useState, useCallback } from "react";
-import { ArrowLeft, ArrowRight, Loader2, Upload, Sparkles, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Loader2, Upload, Sparkles, X, FileText, PenTool } from "lucide-react";
 import { toast } from "sonner";
+
+type IntakeMode = "description" | "script";
 
 interface FormData {
   productName: string;
@@ -24,9 +26,18 @@ interface FormData {
   scriptConcept: string;
   productImageUrl: string | null;
   imageAnalysis: string | null;
+  intakeMode: IntakeMode;
 }
 
-const STEPS = [
+const DESCRIPTION_STEPS = [
+  { id: 1, label: "PRODUCT" },
+  { id: 2, label: "AUDIENCE" },
+  { id: 3, label: "DIRECTION" },
+  { id: 4, label: "CONCEPT" },
+  { id: 5, label: "IMAGE" },
+];
+
+const SCRIPT_STEPS = [
   { id: 1, label: "PRODUCT" },
   { id: 2, label: "AUDIENCE" },
   { id: 3, label: "DIRECTION" },
@@ -37,6 +48,7 @@ const STEPS = [
 export default function IntakeForm() {
   const { user, isAuthenticated, loading: authLoading } = useAuth();
   const [, navigate] = useLocation();
+  const [intakeMode, setIntakeMode] = useState<IntakeMode | null>(null);
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState<FormData>({
     productName: "",
@@ -50,6 +62,7 @@ export default function IntakeForm() {
     scriptConcept: "",
     productImageUrl: null,
     imageAnalysis: null,
+    intakeMode: "description",
   });
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -64,6 +77,8 @@ export default function IntakeForm() {
   const uploadMutation = trpc.brief.uploadImage.useMutation();
   const analyzeMutation = trpc.brief.analyzeImage.useMutation();
   const generateMutation = trpc.brief.generate.useMutation();
+
+  const STEPS = intakeMode === "script" ? SCRIPT_STEPS : DESCRIPTION_STEPS;
 
   const updateField = useCallback(<K extends keyof FormData>(key: K, value: FormData[K]) => {
     setFormData(prev => ({ ...prev, [key]: value }));
@@ -102,14 +117,6 @@ export default function IntakeForm() {
           });
           setAnalysisResult(analysis);
           updateField("imageAnalysis", JSON.stringify(analysis));
-
-          // Pre-fill suggestions if fields are empty
-          if (analysis.suggestedDemographics && !formData.targetAudienceAge) {
-            // Don't auto-fill, just show suggestions
-          }
-          if (analysis.suggestedTone && !formData.toneVibe) {
-            // Don't auto-fill, just show suggestions
-          }
           toast.success("Image analyzed — suggestions available");
         } catch {
           toast.error("Image analysis failed, but upload succeeded");
@@ -123,7 +130,7 @@ export default function IntakeForm() {
     } finally {
       setIsUploading(false);
     }
-  }, [uploadMutation, analyzeMutation, formData.targetAudienceAge, formData.toneVibe, updateField]);
+  }, [uploadMutation, analyzeMutation, updateField]);
 
   const removeImage = useCallback(() => {
     setImagePreview(null);
@@ -177,6 +184,7 @@ export default function IntakeForm() {
         scriptConcept: formData.scriptConcept,
         productImageUrl: formData.productImageUrl,
         imageAnalysis: formData.imageAnalysis,
+        intakeMode: intakeMode || "description",
       });
 
       toast.success("Brief generated!");
@@ -197,6 +205,83 @@ export default function IntakeForm() {
   if (!isAuthenticated) {
     window.location.href = getLoginUrl();
     return null;
+  }
+
+  // Mode selection screen
+  if (!intakeMode) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+        {/* Nav */}
+        <nav className="w-full border-b border-border">
+          <div className="container flex items-center justify-between h-16">
+            <button onClick={() => navigate("/")} className="flex items-center gap-3 hover:opacity-80 transition-opacity">
+              <div className="w-3 h-3 bg-primary" />
+              <span className="font-display text-2xl tracking-wider uppercase">UGC AD DIRECTOR</span>
+            </button>
+            <button
+              onClick={() => navigate("/history")}
+              className="text-muted-foreground hover:text-foreground transition-colors font-sans text-sm uppercase tracking-widest"
+            >
+              History
+            </button>
+          </div>
+        </nav>
+
+        <main className="flex-1 container py-16 max-w-3xl mx-auto">
+          <div className="text-center mb-12">
+            <h1 className="font-display text-5xl md:text-6xl tracking-wider uppercase leading-none mb-4">
+              HOW DO YOU WANT TO <span className="text-primary">START</span>?
+            </h1>
+            <div className="brutal-divider mt-4 mx-auto max-w-[80px]" />
+            <p className="mt-6 text-muted-foreground font-sans text-sm tracking-wide max-w-lg mx-auto">
+              Choose your starting point. Either way, the system will generate a full director's brief that you can edit before creating videos.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Description mode */}
+            <button
+              onClick={() => {
+                setIntakeMode("description");
+                setFormData(prev => ({ ...prev, intakeMode: "description" }));
+              }}
+              className="group border-2 border-border hover:border-primary transition-all p-8 text-left space-y-4"
+            >
+              <div className="w-14 h-14 border border-border group-hover:border-primary group-hover:bg-primary/10 flex items-center justify-center transition-all">
+                <PenTool className="w-7 h-7 text-muted-foreground group-hover:text-primary transition-colors" />
+              </div>
+              <h3 className="font-display text-2xl tracking-wider uppercase">DESCRIPTION</h3>
+              <p className="font-sans text-sm text-muted-foreground leading-relaxed">
+                Describe your product, audience, and ad concept. The AI will write the full script and Seedance prompts for you.
+              </p>
+              <span className="inline-block font-sans text-xs uppercase tracking-widest text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                Best for new ideas →
+              </span>
+            </button>
+
+            {/* Script mode */}
+            <button
+              onClick={() => {
+                setIntakeMode("script");
+                setFormData(prev => ({ ...prev, intakeMode: "script" }));
+              }}
+              className="group border-2 border-border hover:border-primary transition-all p-8 text-left space-y-4"
+            >
+              <div className="w-14 h-14 border border-border group-hover:border-primary group-hover:bg-primary/10 flex items-center justify-center transition-all">
+                <FileText className="w-7 h-7 text-muted-foreground group-hover:text-primary transition-colors" />
+              </div>
+              <h3 className="font-display text-2xl tracking-wider uppercase">FULL SCRIPT</h3>
+              <p className="font-sans text-sm text-muted-foreground leading-relaxed">
+                Already have a script? Paste it in and the AI will convert it into a director's brief with Seedance prompts.
+              </p>
+              <span className="inline-block font-sans text-xs uppercase tracking-widest text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                Best for existing scripts →
+              </span>
+            </button>
+          </div>
+        </main>
+      </div>
+    );
   }
 
   const progressPercent = (step / STEPS.length) * 100;
@@ -223,22 +308,30 @@ export default function IntakeForm() {
       <div className="w-full border-b border-border">
         <div className="container py-4">
           <div className="flex items-center justify-between mb-3">
-            {STEPS.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => s.id < step && setStep(s.id)}
-                className={
-                  "font-display text-xs tracking-widest uppercase transition-colors " +
-                  (s.id === step
-                    ? "text-primary"
-                    : s.id < step
-                    ? "text-foreground cursor-pointer hover:text-primary"
-                    : "text-muted-foreground/40")
-                }
-              >
-                {s.label}
-              </button>
-            ))}
+            <button
+              onClick={() => setIntakeMode(null)}
+              className="font-sans text-xs text-muted-foreground hover:text-primary uppercase tracking-widest transition-colors"
+            >
+              ← {intakeMode === "script" ? "SCRIPT" : "DESCRIPTION"} MODE
+            </button>
+            <div className="flex items-center gap-4">
+              {STEPS.map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => s.id < step && setStep(s.id)}
+                  className={
+                    "font-display text-xs tracking-widest uppercase transition-colors " +
+                    (s.id === step
+                      ? "text-primary"
+                      : s.id < step
+                      ? "text-foreground cursor-pointer hover:text-primary"
+                      : "text-muted-foreground/40")
+                  }
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
           </div>
           <Progress value={progressPercent} className="h-[3px] bg-border [&>div]:bg-primary" />
         </div>
@@ -441,17 +534,26 @@ export default function IntakeForm() {
           </div>
         )}
 
-        {/* Step 4: Script */}
+        {/* Step 4: Script/Concept */}
         {step === 4 && (
           <div className="space-y-8">
             <div>
               <h2 className="font-display text-4xl md:text-5xl tracking-wider uppercase">
-                SCRIPT & <span className="text-primary">CONCEPT</span>
+                {intakeMode === "script" ? (
+                  <>YOUR <span className="text-primary">SCRIPT</span></>
+                ) : (
+                  <>SCRIPT & <span className="text-primary">CONCEPT</span></>
+                )}
               </h2>
               <div className="brutal-divider mt-4 max-w-[80px]" />
+              {intakeMode === "script" && (
+                <p className="mt-4 text-muted-foreground font-sans text-sm tracking-wide">
+                  Paste your full script below. The AI will convert it into a director's brief with Seedance 2.0 prompts, maintaining your script's structure and dialogue.
+                </p>
+              )}
             </div>
 
-            {analysisResult && analysisResult.suggestedAngles.length > 0 && (
+            {intakeMode === "description" && analysisResult && analysisResult.suggestedAngles.length > 0 && (
               <div className="border border-primary/30 bg-primary/5 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-primary">
                   <Sparkles className="w-4 h-4" />
@@ -479,17 +581,23 @@ export default function IntakeForm() {
 
             <div className="space-y-2">
               <Label className="font-sans text-sm uppercase tracking-widest text-muted-foreground">
-                Script or Concept
+                {intakeMode === "script" ? "Full Script" : "Script or Concept"}
               </Label>
               <Textarea
                 value={formData.scriptConcept}
                 onChange={(e) => updateField("scriptConcept", e.target.value)}
-                placeholder="Describe your ad concept, the story arc, key messages, or paste a rough script..."
-                rows={10}
+                placeholder={
+                  intakeMode === "script"
+                    ? "Paste your full ad script here...\n\nExample:\n[HOOK] Hey, you know what changed my morning routine?\n[PROBLEM] I used to spend 20 minutes on skincare...\n[SOLUTION] Then I found GlowSerum Pro...\n[CTA] Link in bio, use code GLOW20..."
+                    : "Describe your ad concept, the story arc, key messages, or paste a rough script..."
+                }
+                rows={intakeMode === "script" ? 14 : 10}
                 className="bg-input border-border text-foreground font-sans text-base px-4 py-3 placeholder:text-muted-foreground/50 resize-none"
               />
               <p className="text-xs text-muted-foreground font-sans tracking-wide">
-                Be as detailed as possible. The AI will use this to craft your Seedance prompts.
+                {intakeMode === "script"
+                  ? "The AI will break your script into " + formData.segmentCount + " segments and create detailed Seedance prompts for each."
+                  : "Be as detailed as possible. The AI will use this to craft your Seedance prompts."}
               </p>
             </div>
           </div>
@@ -581,11 +689,11 @@ export default function IntakeForm() {
         <div className="flex items-center justify-between mt-12 pt-8 border-t border-border">
           <Button
             variant="outline"
-            onClick={() => step === 1 ? navigate("/") : setStep(step - 1)}
+            onClick={() => step === 1 ? setIntakeMode(null) : setStep(step - 1)}
             className="border-border text-foreground hover:bg-secondary font-sans uppercase tracking-widest text-sm px-6 h-12"
           >
             <ArrowLeft className="w-4 h-4 mr-2" />
-            {step === 1 ? "HOME" : "BACK"}
+            {step === 1 ? "CHANGE MODE" : "BACK"}
           </Button>
 
           {step < STEPS.length ? (

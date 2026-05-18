@@ -125,6 +125,15 @@ export async function getBriefById(id: number) {
   return result.length > 0 ? result[0] : null;
 }
 
+// Brief update helper
+
+export async function updateBrief(id: number, data: Partial<Pick<InsertBrief, "generatedBrief" | "editedBrief" | "creatorImageUrl">>) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.update(briefs).set(data).where(eq(briefs.id, id));
+}
+
 // Video job helpers
 
 export async function createVideoJob(data: InsertVideoJob) {

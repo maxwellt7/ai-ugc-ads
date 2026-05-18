@@ -5,7 +5,7 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { invokeLLM } from "./_core/llm";
 import { notifyOwner } from "./_core/notification";
 import {
-  createBrief, getBriefsByUserId, getBriefById,
+  createBrief, getBriefsByUserId, getBriefById, updateBrief,
   createVideoJob, getVideoJobsByBriefId, getVideoJobById, updateVideoJob,
   getVideoJobByBriefAndSegment, deleteVideoJob,
   createStitchJob, getStitchJobById, getStitchJobByBriefId, updateStitchJob, deleteStitchJob,
@@ -81,6 +81,7 @@ function buildUserPrompt(data: {
   segmentCount: number;
   scriptConcept: string;
   imageAnalysis?: string | null;
+  intakeMode?: string;
 }) {
   const totalDuration = data.segmentCount * 15;
   const lines = [
@@ -92,10 +93,26 @@ function buildUserPrompt(data: {
     "**Ad Goal:** " + data.adGoal,
     "**Tone/Vibe:** " + data.toneVibe,
     "**Number of Segments:** EXACTLY " + data.segmentCount + " (each 15 seconds, " + totalDuration + "s total)",
-    "**Script/Concept:** " + data.scriptConcept,
+    (data.intakeMode === "script"
+      ? "**Full Script (convert to Seedance prompts):**\n" + data.scriptConcept
+      : "**Script/Concept:** " + data.scriptConcept),
     "",
     "CRITICAL: You MUST produce EXACTLY " + data.segmentCount + " segments. Not " + (data.segmentCount + 1) + ", not " + (data.segmentCount - 1) + ". EXACTLY " + data.segmentCount + ". If the script has more sections than " + data.segmentCount + ", combine them. If it has fewer, split them.",
   ];
+
+  if (data.intakeMode === "script") {
+    lines.push(
+      "",
+      "SCRIPT-TO-BRIEF CONVERSION INSTRUCTIONS:",
+      "The user has provided a FULL SCRIPT above. Your job is to:",
+      "1. Preserve the user's dialogue and structure as closely as possible",
+      "2. Break the script into EXACTLY " + data.segmentCount + " segments of 15 seconds each",
+      "3. Convert each section into a detailed Seedance 2.0 visual prompt with specific actions, expressions, and environment",
+      "4. Keep the user's exact dialogue in the Audio section of each segment",
+      "5. Add visual direction (hands, face, lighting, background) that matches the script's intent",
+      "6. Do NOT rewrite the user's words — enhance them with visual specificity",
+    );
+  }
 
   if (data.imageAnalysis) {
     lines.push("**Image Analysis Insights:** " + data.imageAnalysis);
@@ -204,6 +221,7 @@ export const appRouter = router({
           scriptConcept: z.string().min(1),
           productImageUrl: z.string().nullable().optional(),
           imageAnalysis: z.string().nullable().optional(),
+          intakeMode: z.enum(["description", "script"]).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
@@ -276,6 +294,7 @@ export const appRouter = router({
           productImageUrl: input.productImageUrl ?? null,
           imageAnalysis: input.imageAnalysis ?? null,
           generatedBrief,
+          intakeMode: input.intakeMode || "description",
           pinterestLinks: JSON.stringify(pinterestLinks),
         });
 
@@ -401,6 +420,40 @@ export const appRouter = router({
           return null;
         }
         return brief;
+      }),
+
+    /** Update the brief content (editable brief) */
+    update: protectedProcedure
+      .input(
+        z.object({
+          id: z.number(),
+          editedBrief: z.string().min(1),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.id);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+        await updateBrief(input.id, { editedBrief: input.editedBrief });
+        return { success: true };
+      }),
+
+    /** Upload/update the creator reference image for consistent avatar */
+    updateCreatorImage: protectedProcedure
+      .input(
+        z.object({
+          id: z.number(),
+          creatorImageUrl: z.string().min(1),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.id);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+        await updateBrief(input.id, { creatorImageUrl: input.creatorImageUrl });
+        return { success: true, creatorImageUrl: input.creatorImageUrl };
       }),
   }),
 

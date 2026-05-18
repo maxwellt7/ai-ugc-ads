@@ -63,3 +63,16 @@
 - [x] Add segment count enforcement post-processing: truncate extra LLM-generated segments to match requested count, re-append Step 4 review section if cut off
 - [x] Frontend segment enforcement: BriefResult.tsx already slices parsed segments to brief.segmentCount
 - [x] All 49 tests passing across 6 test files (18 video, 13 stitch, 13 brief, 2 WaveSpeed, 2 Shotstack, 1 auth)
+
+## New Features (Round 3)
+- [x] Avatar anchoring: upload a creator reference image that gets passed to WaveSpeed for every segment to ensure consistent avatar
+- [x] Script-first intake: new option to paste a full script (in addition to description-based flow) that generates a brief
+- [x] Editable brief: allow human editing of the generated brief before triggering video creation
+- [x] Database: added creatorImageUrl, intakeMode, editedBrief columns to briefs table
+- [x] Backend: brief.update and brief.updateCreatorImage tRPC routes
+- [x] Frontend: mode selection screen (Description vs Full Script) at start of intake
+- [x] Frontend: creator reference image upload on BriefResult page with visual confirmation
+- [x] Frontend: Edit Brief button with inline textarea editor and save/cancel
+- [x] Frontend: referenceImages auto-passed to video.generate, video.generateAll, and video.regenerate when creator image is set
+- [x] Backend: buildUserPrompt adds script-specific conversion instructions when intakeMode=script (preserve dialogue, add visual direction)
+- [x] Tests: 58 tests passing across 6 test files (22 brief, 18 video, 13 stitch, 2 WaveSpeed, 2 Shotstack, 1 auth)

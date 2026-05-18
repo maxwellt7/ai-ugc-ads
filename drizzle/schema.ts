@@ -30,6 +30,9 @@ export const briefs = mysqlTable("briefs", {
   productImageUrl: text("productImageUrl"),
   imageAnalysis: text("imageAnalysis"),
   generatedBrief: text("generatedBrief").notNull(),
+  editedBrief: text("editedBrief"),
+  creatorImageUrl: text("creatorImageUrl"),
+  intakeMode: mysqlEnum("intakeMode", ["description", "script"]).default("description").notNull(),
   pinterestLinks: json("pinterestLinks"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });

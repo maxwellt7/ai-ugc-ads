@@ -1,0 +1,9 @@
+{
+  "query": "ALTER TABLE `briefs` ADD `editedBrief` text; ALTER TABLE `briefs` ADD `creatorImageUrl` text; ALTER TABLE `briefs` ADD `intakeMode` enum('description','script') DEFAULT 'description' NOT NULL;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway05.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3kHsu6sGTcUzFnN.a47c12d768d5 --database geo45KSNjCpQ6XLUgKF4xW --execute ALTER TABLE `briefs` ADD `editedBrief` text; ALTER TABLE `briefs` ADD `creatorImageUrl` text; ALTER TABLE `briefs` ADD `intakeMode` enum('description','script') DEFAULT 'description' NOT NULL;",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 1355
+}

@@ -94,6 +94,11 @@ vi.mock("./db", () => ({
   getVideoJobById: vi.fn(),
   getVideoJobByBriefAndSegment: vi.fn(),
   updateVideoJob: vi.fn(),
+  deleteVideoJob: vi.fn(),
+  updateBrief: vi.fn().mockResolvedValue(undefined),
+  deleteStitchJob: vi.fn(),
+  getVideoSummaryByBriefIds: vi.fn().mockResolvedValue([]),
+  getStitchSummaryByBriefIds: vi.fn().mockResolvedValue([]),
 }));
 
 // Mock notification
