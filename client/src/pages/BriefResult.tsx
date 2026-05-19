@@ -4,7 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import { useLocation, useParams } from "wouter";
 import { useMemo, useEffect, useRef, useCallback } from "react";
-import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle, Scissors, Clapperboard, MessageSquare, Send, Upload, Pencil, Save, X, User } from "lucide-react";
+import { ArrowLeft, Copy, Check, Download, Loader2, ExternalLink, Play, Film, RefreshCw, AlertCircle, Scissors, Clapperboard, MessageSquare, Send, Upload, Pencil, Save, X, User, Zap, ShieldCheck, RotateCcw, ImageIcon } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 import { Streamdown } from "streamdown";
@@ -182,10 +182,28 @@ export default function BriefResult() {
     return parsed;
   }, [activeBriefContent, brief?.segmentCount]);
 
+  // Thumbstopper state
+  const [thumbstopperUrl, setThumbstopperUrl] = useState<string | null>(null);
+  const [thumbstopperCallout, setThumbstopperCallout] = useState<string>("");
+  const [isGeneratingThumbstopper, setIsGeneratingThumbstopper] = useState(false);
+  const [customCallout, setCustomCallout] = useState("");
+
+  // Audio QC state
+  const [audioQcResults, setAudioQcResults] = useState<Map<number, { status: string; issues: string[]; transcript?: string }>>(new Map());
+  const [runningAudioQc, setRunningAudioQc] = useState<number | null>(null);
+  const [runningBatchQc, setRunningBatchQc] = useState(false);
+
+  // Re-stitch state
+  const [isResettingStitch, setIsResettingStitch] = useState(false);
+
   const generateMutation = trpc.video.generate.useMutation();
   const generateAllMutation = trpc.video.generateAll.useMutation();
   const regenerateMutation = trpc.video.regenerate.useMutation();
   const stitchCreateMutation = trpc.stitch.create.useMutation();
+  const stitchResetMutation = trpc.stitch.reset.useMutation();
+  const thumbstopperMutation = trpc.thumbstopper.generate.useMutation();
+  const audioQcCheckMutation = trpc.audioQc.check.useMutation();
+  const audioQcCheckAllMutation = trpc.audioQc.checkAll.useMutation();
   const uploadMutation = trpc.brief.uploadImage.useMutation();
   const updateCreatorImageMutation = trpc.brief.updateCreatorImage.useMutation();
   const updateBriefMutation = trpc.brief.update.useMutation();
@@ -560,14 +578,107 @@ export default function BriefResult() {
   const handleStitch = async () => {
     setStitching(true);
     try {
-      await stitchCreateMutation.mutateAsync({ briefId });
-      toast.success("Video stitching started! This may take 1-2 minutes.");
+      await stitchCreateMutation.mutateAsync({
+        briefId,
+        thumbstopperUrl: thumbstopperUrl || undefined,
+        thumbstopperDuration: thumbstopperUrl ? 3 : undefined,
+      });
+      toast.success("Video stitching started! This may take 1-2 minutes." + (thumbstopperUrl ? " Thumbstopper included!" : ""));
       refetchStitch();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to start stitching";
       toast.error(msg);
     } finally {
       setStitching(false);
+    }
+  };
+
+  // Thumbstopper generation handler
+  const handleGenerateThumbstopper = async () => {
+    if (!brief) return;
+    setIsGeneratingThumbstopper(true);
+    try {
+      const result = await thumbstopperMutation.mutateAsync({
+        briefId,
+        productName: brief.productName,
+        adGoal: brief.adGoal,
+        targetAudience: brief.targetAudienceAge + ", " + brief.targetAudienceGender + ", " + brief.targetAudienceLifestyle,
+        customCallout: customCallout.trim() || undefined,
+      });
+      setThumbstopperUrl(result.imageUrl);
+      setThumbstopperCallout(result.calloutText);
+      toast.success("Thumbstopper generated: \"" + result.calloutText + "\"");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to generate thumbstopper";
+      toast.error(msg);
+    } finally {
+      setIsGeneratingThumbstopper(false);
+    }
+  };
+
+  // Audio QC single segment handler
+  const handleAudioQcCheck = async (jobId: number, segmentIndex: number, expectedDialogue?: string) => {
+    setRunningAudioQc(segmentIndex);
+    try {
+      const result = await audioQcCheckMutation.mutateAsync({
+        jobId,
+        expectedDialogue,
+      });
+      setAudioQcResults((prev) => {
+        const next = new Map(prev);
+        next.set(segmentIndex, {
+          status: result.status,
+          issues: result.issues || [],
+          transcript: result.transcript || undefined,
+        });
+        return next;
+      });
+      if (result.status === "passed") {
+        toast.success("Segment " + (segmentIndex + 1) + " audio QC passed!");
+      } else {
+        toast.error("Segment " + (segmentIndex + 1) + " audio QC failed — " + (result.issues?.[0] || "issues detected"));
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Audio QC failed";
+      toast.error(msg);
+    } finally {
+      setRunningAudioQc(null);
+    }
+  };
+
+  // Audio QC batch handler
+  const handleAudioQcAll = async () => {
+    setRunningBatchQc(true);
+    try {
+      const result = await audioQcCheckAllMutation.mutateAsync({ briefId });
+      for (const r of result.results) {
+        setAudioQcResults((prev) => {
+          const next = new Map(prev);
+          next.set(r.segmentIndex, { status: r.status, issues: r.issues });
+          return next;
+        });
+      }
+      toast.success(result.passed + "/" + result.totalChecked + " segments passed audio QC");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Batch audio QC failed";
+      toast.error(msg);
+    } finally {
+      setRunningBatchQc(false);
+    }
+  };
+
+  // Re-stitch handler
+  const handleResetStitch = async () => {
+    setIsResettingStitch(true);
+    try {
+      await stitchResetMutation.mutateAsync({ briefId });
+      toast.success("Stitch reset! You can now re-stitch with updated segments.");
+      refetchStitch();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to reset stitch";
+      toast.error(msg);
+    } finally {
+      setIsResettingStitch(false);
     }
   };
 
@@ -874,7 +985,7 @@ export default function BriefResult() {
                             playsInline
                           />
                         </div>
-                        <div className="flex justify-center gap-4 mt-3">
+                        <div className="flex flex-wrap justify-center gap-4 mt-3">
                           <a
                             href={job.videoUrl}
                             target="_blank"
@@ -889,7 +1000,47 @@ export default function BriefResult() {
                           >
                             <MessageSquare className="w-3 h-3" /> {isFeedbackOpen ? "CLOSE" : "FEEDBACK"}
                           </button>
+                          <button
+                            onClick={() => handleAudioQcCheck(job.jobId, i, seg.prompt)}
+                            disabled={runningAudioQc === i}
+                            className="inline-flex items-center gap-2 text-xs font-sans uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                          >
+                            {runningAudioQc === i ? (
+                              <><Loader2 className="w-3 h-3 animate-spin" /> CHECKING...</>
+                            ) : (
+                              <><ShieldCheck className="w-3 h-3" /> AUDIO QC</>
+                            )}
+                          </button>
                         </div>
+                        {/* Audio QC Result */}
+                        {audioQcResults.get(i) && (
+                          <div className={`mt-3 p-3 border ${
+                            audioQcResults.get(i)!.status === "passed"
+                              ? "border-green-500/30 bg-green-500/5"
+                              : "border-red-500/30 bg-red-500/5"
+                          }`}>
+                            <div className="flex items-center gap-2 mb-1">
+                              {audioQcResults.get(i)!.status === "passed" ? (
+                                <><ShieldCheck className="w-3 h-3 text-green-400" /><span className="text-xs font-sans uppercase tracking-widest text-green-400">Audio QC Passed</span></>
+                              ) : (
+                                <><AlertCircle className="w-3 h-3 text-red-400" /><span className="text-xs font-sans uppercase tracking-widest text-red-400">Audio QC Failed</span></>
+                              )}
+                            </div>
+                            {audioQcResults.get(i)!.issues.length > 0 && (
+                              <ul className="list-disc list-inside text-xs text-red-400 font-sans mt-1">
+                                {audioQcResults.get(i)!.issues.map((issue, idx) => (
+                                  <li key={idx}>{issue}</li>
+                                ))}
+                              </ul>
+                            )}
+                            {audioQcResults.get(i)!.transcript && (
+                              <details className="mt-2">
+                                <summary className="text-xs font-sans text-muted-foreground cursor-pointer uppercase tracking-widest">View Transcript</summary>
+                                <p className="mt-1 text-xs font-mono text-muted-foreground whitespace-pre-wrap">{audioQcResults.get(i)!.transcript}</p>
+                              </details>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -967,6 +1118,125 @@ export default function BriefResult() {
           </section>
         )}
 
+        {/* Audio QC Batch Check */}
+        {allSegmentsCompleted && (
+          <section className="mb-10">
+            <div className="brutal-divider mb-10" />
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-display text-2xl tracking-wider uppercase">
+                AUDIO <span className="text-primary">QUALITY CHECK</span>
+              </h2>
+              <Button
+                onClick={handleAudioQcAll}
+                disabled={runningBatchQc}
+                variant="outline"
+                className="border-border text-foreground hover:bg-primary hover:text-primary-foreground font-sans uppercase tracking-widest text-xs h-10 px-4"
+              >
+                {runningBatchQc ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> CHECKING ALL...</>
+                ) : (
+                  <><ShieldCheck className="w-4 h-4 mr-2" /> CHECK ALL SEGMENTS</>
+                )}
+              </Button>
+            </div>
+            <p className="text-muted-foreground font-sans text-xs uppercase tracking-widest mb-4">
+              Validate audio quality across all segments before stitching. Detects glitches, silence, and mismatched dialogue.
+            </p>
+            {audioQcResults.size > 0 && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {Array.from(audioQcResults.entries()).sort((a, b) => a[0] - b[0]).map(([segIdx, result]) => (
+                  <div key={segIdx} className={`p-3 border ${
+                    result.status === "passed" ? "border-green-500/30 bg-green-500/5" :
+                    result.status === "failed" ? "border-red-500/30 bg-red-500/5" :
+                    "border-yellow-500/30 bg-yellow-500/5"
+                  }`}>
+                    <span className="font-sans text-xs uppercase tracking-widest block mb-1 text-muted-foreground">Seg {segIdx + 1}</span>
+                    <span className={`font-sans text-xs uppercase tracking-widest ${
+                      result.status === "passed" ? "text-green-400" :
+                      result.status === "failed" ? "text-red-400" : "text-yellow-400"
+                    }`}>{result.status.toUpperCase()}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Thumbstopper Generation Section */}
+        {allSegmentsCompleted && (
+          <section className="mb-10">
+            <div className="brutal-divider mb-10" />
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-display text-2xl tracking-wider uppercase">
+                THUMB<span className="text-primary">STOPPER</span>
+              </h2>
+            </div>
+            <p className="text-muted-foreground font-sans text-xs uppercase tracking-widest mb-4">
+              Generate an aggressive callout frame that gets stitched as the FIRST frame of your final ad
+            </p>
+
+            {!thumbstopperUrl ? (
+              <div className="border border-border p-6">
+                <div className="mb-4">
+                  <label className="font-sans text-xs uppercase tracking-widest text-muted-foreground block mb-2">
+                    Custom callout (optional — leave blank for AI-generated)
+                  </label>
+                  <input
+                    type="text"
+                    value={customCallout}
+                    onChange={(e) => setCustomCallout(e.target.value)}
+                    placeholder="e.g. Stop Scrolling If You Take GLP-1s"
+                    className="w-full bg-input border border-border text-foreground font-sans text-sm px-3 py-2 placeholder:text-muted-foreground/50"
+                    maxLength={60}
+                  />
+                </div>
+                <Button
+                  onClick={handleGenerateThumbstopper}
+                  disabled={isGeneratingThumbstopper}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs h-10 px-5"
+                >
+                  {isGeneratingThumbstopper ? (
+                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> GENERATING...</>
+                  ) : (
+                    <><Zap className="w-4 h-4 mr-2" /> GENERATE THUMBSTOPPER</>
+                  )}
+                </Button>
+              </div>
+            ) : (
+              <div className="border border-border">
+                <div className="flex items-center justify-between p-4 border-b border-border bg-secondary/30">
+                  <div className="flex items-center gap-3">
+                    <ImageIcon className="w-5 h-5 text-primary" />
+                    <span className="font-display text-lg tracking-wider uppercase">THUMBSTOPPER READY</span>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-sans uppercase tracking-widest border bg-green-500/20 text-green-400 border-green-500/40">
+                      <Check className="w-3 h-3" /> SET
+                    </span>
+                  </div>
+                  <Button
+                    onClick={() => { setThumbstopperUrl(null); setThumbstopperCallout(""); }}
+                    variant="outline"
+                    size="sm"
+                    className="border-border text-foreground hover:bg-destructive hover:text-destructive-foreground font-sans uppercase tracking-widest text-xs"
+                  >
+                    <X className="w-3 h-3 mr-1" /> REMOVE
+                  </Button>
+                </div>
+                <div className="p-6 bg-secondary/10">
+                  <div className="relative w-full max-w-[280px] mx-auto aspect-[9/16] bg-black border border-border">
+                    <img src={thumbstopperUrl} alt="Thumbstopper" className="w-full h-full object-contain" />
+                  </div>
+                  <p className="text-center mt-3 font-sans text-xs text-primary uppercase tracking-widest">
+                    "{thumbstopperCallout}"
+                  </p>
+                  <p className="text-center mt-1 font-sans text-[10px] text-muted-foreground uppercase tracking-widest">
+                    This will be the first 3 seconds of your final ad
+                  </p>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
         {/* Stitch Final Ad Section */}
         {(canStitch || existingStitchJob) && (
           <section className="mb-10">
@@ -975,22 +1245,49 @@ export default function BriefResult() {
               <h2 className="font-display text-2xl tracking-wider uppercase">
                 FINAL <span className="text-primary">AD</span>
               </h2>
-              {canStitch && (
-                <Button
-                  onClick={handleStitch}
-                  disabled={stitching}
-                  className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs px-5 h-10"
-                >
-                  {stitching ? (
-                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> SUBMITTING...</>
-                  ) : existingStitchJob?.status === "failed" ? (
-                    <><RefreshCw className="w-4 h-4 mr-2" /> RETRY STITCH</>
-                  ) : (
-                    <><Scissors className="w-4 h-4 mr-2" /> STITCH FINAL AD</>
-                  )}
-                </Button>
-              )}
+              <div className="flex items-center gap-2">
+                {/* Re-stitch button — shown when stitch is done and user may want to re-do after regenerating segments */}
+                {(stitchDone || stitchFailed) && (
+                  <Button
+                    onClick={handleResetStitch}
+                    disabled={isResettingStitch}
+                    variant="outline"
+                    className="border-border text-foreground hover:bg-secondary font-sans uppercase tracking-widest text-xs h-10 px-4"
+                  >
+                    {isResettingStitch ? (
+                      <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> RESETTING...</>
+                    ) : (
+                      <><RotateCcw className="w-4 h-4 mr-2" /> RE-STITCH</>
+                    )}
+                  </Button>
+                )}
+                {canStitch && (
+                  <Button
+                    onClick={handleStitch}
+                    disabled={stitching}
+                    className="bg-primary text-primary-foreground hover:bg-primary/90 font-sans uppercase tracking-widest text-xs px-5 h-10"
+                  >
+                    {stitching ? (
+                      <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> SUBMITTING...</>
+                    ) : existingStitchJob?.status === "failed" ? (
+                      <><RefreshCw className="w-4 h-4 mr-2" /> RETRY STITCH</>
+                    ) : (
+                      <><Scissors className="w-4 h-4 mr-2" /> STITCH FINAL AD</>
+                    )}
+                  </Button>
+                )}
+              </div>
             </div>
+
+            {/* Thumbstopper indicator */}
+            {thumbstopperUrl && !stitchDone && (
+              <div className="mb-4 p-3 border border-primary/30 bg-primary/5 flex items-center gap-3">
+                <Zap className="w-4 h-4 text-primary flex-shrink-0" />
+                <span className="font-sans text-xs text-primary uppercase tracking-widest">
+                  Thumbstopper will be prepended as the first 3 seconds of the final ad
+                </span>
+              </div>
+            )}
 
             {/* Stitch in progress */}
             {stitchInProgress && (

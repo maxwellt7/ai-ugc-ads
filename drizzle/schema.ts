@@ -33,6 +33,7 @@ export const briefs = mysqlTable("briefs", {
   editedBrief: text("editedBrief"),
   creatorImageUrl: text("creatorImageUrl"),
   intakeMode: mysqlEnum("intakeMode", ["description", "script"]).default("description").notNull(),
+  adStyle: mysqlEnum("adStyle", ["ugc", "animated", "direct_response"]).default("ugc").notNull(),
   pinterestLinks: json("pinterestLinks"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
@@ -54,6 +55,8 @@ export const videoJobs = mysqlTable("video_jobs", {
   resolution: varchar("resolution", { length: 10 }).default("720p").notNull(),
   duration: int("duration").default(15).notNull(),
   feedback: text("feedback"),
+  audioQcStatus: mysqlEnum("audioQcStatus", ["pending", "passed", "failed", "skipped"]).default("pending"),
+  audioQcTranscript: text("audioQcTranscript"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -70,6 +73,8 @@ export const stitchJobs = mysqlTable("stitch_jobs", {
   finalVideoUrl: text("finalVideoUrl"),
   errorMessage: text("errorMessage"),
   segmentCount: int("segmentCount").notNull(),
+  thumbstopperUrl: text("thumbstopperUrl"),
+  thumbstopperText: text("thumbstopperText"),
   aspectRatio: varchar("aspectRatio", { length: 20 }).default("9:16").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

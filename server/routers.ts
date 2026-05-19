@@ -13,7 +13,9 @@ import {
 } from "./db";
 import { submitVideoTask, getVideoTaskResult } from "./wavespeed";
 import { buildStitchEdit, submitShotstackRender, getShotstackRenderStatus } from "./shotstack";
-import { storagePut } from "./storage";
+import { storagePut, storageGetSignedUrl } from "./storage";
+import { generateImage } from "./_core/imageGeneration";
+import { transcribeAudio } from "./_core/voiceTranscription";
 import { z } from "zod";
 
 const SEEDANCE_SYSTEM_PROMPT = [
@@ -30,6 +32,13 @@ const SEEDANCE_SYSTEM_PROMPT = [
   "ANTI-CINEMATIC RULES (NON-NEGOTIABLE):",
   "ALWAYS use: iPhone handheld, natural lighting / window light, UGC style, slight camera shake, casual, authentic, 9:16",
   "NEVER use: cinematic, camera brands (ARRI, RED, Blackmagic), anamorphic, film grain, dramatic lighting, speed ramp, bloom flash, lens flare, whip pan, crane, dolly, steadicam, gimbal, Dutch angle, color grade, LUT, bokeh, epic, breathtaking, stunning, slow motion (unless \"iPhone slow-mo\"), depth of field alone (say \"phone camera depth of field\")",
+  "",
+  "NO TEXT OVERLAYS (CRITICAL):",
+  "NEVER include any text, captions, subtitles, titles, lower thirds, or text overlays in the video prompts.",
+  "NEVER describe text appearing on screen, floating text, caption bars, notification-style text, or any visible written words.",
+  "NEVER mention 'text overlay', 'caption', 'subtitle', 'title card', or 'on-screen text' in any prompt.",
+  "If the scene involves a phone screen, describe it as showing a generic app interface or being face-down — NEVER with readable text.",
+  "The video should be PURELY visual + audio with spoken dialogue. Any text will be added in post-production, NOT by the AI video generator.",
   "",
   "CREATOR CONSISTENCY (CRITICAL):",
   "You MUST define ONE detailed creator persona at the start of the brief. This EXACT same person appears in EVERY segment.",
@@ -82,6 +91,7 @@ function buildUserPrompt(data: {
   scriptConcept: string;
   imageAnalysis?: string | null;
   intakeMode?: string;
+  adStyle?: string;
 }) {
   const totalDuration = data.segmentCount * 15;
   const lines = [
@@ -99,6 +109,19 @@ function buildUserPrompt(data: {
     "",
     "CRITICAL: You MUST produce EXACTLY " + data.segmentCount + " segments. Not " + (data.segmentCount + 1) + ", not " + (data.segmentCount - 1) + ". EXACTLY " + data.segmentCount + ". If the script has more sections than " + data.segmentCount + ", combine them. If it has fewer, split them.",
   ];
+
+  if (data.adStyle === "animated") {
+    lines.push(
+      "",
+      "AD STYLE: ANIMATED 3D MASCOT",
+      "Instead of a human UGC creator, this ad features an animated 3D mascot/character.",
+      "Replace all references to a human creator with a detailed 3D character description.",
+      "The character should be: colorful, expressive, brand-appropriate, with exaggerated features for engagement.",
+      "Environment should be stylized/rendered rather than realistic.",
+      "Keep the same segment structure but adapt visual descriptions for animation.",
+      "Audio should still include natural-sounding voiceover matched to the character.",
+    );
+  }
 
   if (data.intakeMode === "script") {
     lines.push(
@@ -222,12 +245,14 @@ export const appRouter = router({
           productImageUrl: z.string().nullable().optional(),
           imageAnalysis: z.string().nullable().optional(),
           intakeMode: z.enum(["description", "script"]).optional(),
+          adStyle: z.enum(["ugc", "animated", "direct_response"]).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
         const userPrompt = buildUserPrompt({
           ...input,
           imageAnalysis: input.imageAnalysis,
+          adStyle: input.adStyle || "ugc",
         });
 
         const llmResponse = await invokeLLM({
@@ -295,6 +320,7 @@ export const appRouter = router({
           imageAnalysis: input.imageAnalysis ?? null,
           generatedBrief,
           intakeMode: input.intakeMode || "description",
+          adStyle: input.adStyle || "ugc",
           pinterestLinks: JSON.stringify(pinterestLinks),
         });
 
@@ -437,6 +463,91 @@ export const appRouter = router({
         }
         await updateBrief(input.id, { editedBrief: input.editedBrief });
         return { success: true };
+      }),
+
+    /** Generate a script using belief engineering framework when user doesn't have one */
+    generateScript: protectedProcedure
+      .input(
+        z.object({
+          productName: z.string().min(1),
+          productDescription: z.string().min(1),
+          targetAudienceAge: z.string().min(1),
+          targetAudienceGender: z.string().min(1),
+          targetAudienceLifestyle: z.string().min(1),
+          adGoal: z.enum(["awareness", "conversion", "retention"]),
+          toneVibe: z.string().min(1),
+          segmentCount: z.number().min(1).max(4),
+          adStyle: z.enum(["ugc", "animated", "direct_response"]).optional(),
+        })
+      )
+      .mutation(async ({ input }) => {
+        const beliefPrompt = [
+          "You are an expert direct-response copywriter using the Belief Engineering framework.",
+          "Your job is to write a compelling UGC video ad script.",
+          "",
+          "BELIEF ENGINEERING FRAMEWORK:",
+          "1. Identify the Belief Gap — the distance between prospect's current beliefs and beliefs needed to buy",
+          "2. Build a Belief Bridge using the Six Bricks: Outcome, Identity, Problem, Solution, Product, Credibility",
+          "3. Move prospect from Closed → Receptive → Transformed state",
+          "",
+          "AD STRUCTURE (adapt to segment count):",
+          "- HOOK (first segment): Use a scroll-stopping opener. Options:",
+          "  * 'Why Problem' — 'Why are [audience] struggling with [problem]?'",
+          "  * 'Internal Dialogue' — First-person emotional moment",
+          "  * 'Why Contrast' — 'Why do some people [outcome] easily but others struggle?'",
+          "  * 'Case Study' — '[Name] got [result] in [timeframe]'",
+          "  * 'Real Reason' — 'What's the REAL reason you can't [outcome]?'",
+          "",
+          "- BODY (middle segments): Install beliefs using:",
+          "  * Root cause / Fatal Flaw of common solutions",
+          "  * Unique mechanism (Hidden Lock + Master Key)",
+          "  * Social proof / transformation story",
+          "  * 'It's not your fault' absolution",
+          "  * Remove the Retreat (make inaction feel risky)",
+          "",
+          "- CTA (final segment): Close with:",
+          "  * Bullet points tied to problems/outcomes",
+          "  * Urgency / scarcity",
+          "  * Clear next step",
+          "",
+          "RULES:",
+          "- Write natural, conversational dialogue (contractions, filler words, fragments)",
+          "- Each segment = 15 seconds of spoken content",
+          "- Include stage directions in brackets [looks at camera, holds product up]",
+          "- Make it feel like a real person talking to camera, NOT a polished commercial",
+          "- Be specific and aggressive — generic scripts don't convert",
+          "",
+          "OUTPUT FORMAT:",
+          "Return ONLY the script text, broken into segments with clear labels.",
+          "Each segment should have: the spoken dialogue + [stage directions]",
+        ].join("\n");
+
+        const userMsg = [
+          "Write a " + input.segmentCount + "-segment UGC video ad script for:",
+          "",
+          "Product: " + input.productName,
+          "Description: " + input.productDescription,
+          "Target: " + input.targetAudienceAge + ", " + input.targetAudienceGender + ", " + input.targetAudienceLifestyle,
+          "Goal: " + input.adGoal,
+          "Tone: " + input.toneVibe,
+          "Style: " + (input.adStyle || "ugc"),
+          "",
+          "Write EXACTLY " + input.segmentCount + " segments, each 15 seconds of natural spoken content.",
+          "Make the hook AGGRESSIVE and scroll-stopping. Use belief engineering to move the viewer from skepticism to action.",
+        ].join("\n");
+
+        const llmResponse = await invokeLLM({
+          messages: [
+            { role: "system", content: beliefPrompt },
+            { role: "user", content: userMsg },
+          ],
+        });
+
+        const script = typeof llmResponse.choices[0]?.message?.content === "string"
+          ? llmResponse.choices[0].message.content
+          : "";
+
+        return { script };
       }),
 
     /** Upload/update the creator reference image for consistent avatar */
@@ -626,15 +737,29 @@ export const appRouter = router({
         }
 
         // Use LLM to revise the prompt based on feedback
+        const productName = brief.productName || "the product";
         const revisionResponse = await invokeLLM({
           messages: [
             {
               role: "system",
-              content: "You are the Seedance 2.0 UGC Ad Director. You revise video prompts based on user feedback. Output ONLY the revised prompt text that goes inside the code block — no markdown fences, no headers, no explanation. Keep the same format: 9:16, 15 seconds, same creator description, same time blocks [0:00-0:05], [0:05-0:10], [0:10-0:15], and Audio line. Apply the feedback while maintaining all Seedance 2.0 rules (UGC style, iPhone handheld, natural dialogue, no cinematic language).",
+              content: [
+                "You are a UGC video ad prompt editor. You revise video generation prompts based on user feedback.",
+                "",
+                "CRITICAL RULES:",
+                "- The product being advertised is: " + productName + ". Use ONLY this name in any dialogue or script references.",
+                "- NEVER use the word 'Seedance' in the ad dialogue or script. Seedance is the video generation tool, NOT the product.",
+                "- NEVER replace the product name with any other word.",
+                "- Output ONLY the revised prompt text — no markdown fences, no headers, no explanation.",
+                "- Keep the same format: 9:16, 15 seconds, same creator description, same time blocks [0:00-0:05], [0:05-0:10], [0:10-0:15], and Audio line.",
+                "- Apply the feedback while maintaining UGC style (iPhone handheld, natural dialogue, no cinematic language).",
+                "- Preserve the product name exactly as it appears in the original prompt.",
+                "- NEVER include text overlays, captions, subtitles, or any visible text in the video prompt. Text is added in post, not by the AI video generator.",
+                "- If a phone screen is shown, describe it as a generic app interface or face-down — NEVER with readable text.",
+              ].join("\n"),
             },
             {
               role: "user",
-              content: "Here is the original Seedance 2.0 prompt:\n\n" + input.originalPrompt + "\n\nUser feedback:\n" + input.feedback + "\n\nRevise the prompt to address this feedback. Output ONLY the revised prompt content.",
+              content: "Product name: " + productName + "\n\nHere is the original video prompt:\n\n" + input.originalPrompt + "\n\nUser feedback:\n" + input.feedback + "\n\nRevise the prompt to address this feedback. Remember: the product is '" + productName + "' — do NOT substitute any other name. Output ONLY the revised prompt content.",
             },
           ],
         });
@@ -792,6 +917,8 @@ export const appRouter = router({
       .input(
         z.object({
           briefId: z.number(),
+          thumbstopperUrl: z.string().optional(),
+          thumbstopperDuration: z.number().min(1).max(5).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
@@ -816,11 +943,53 @@ export const appRouter = router({
           throw new Error("No completed video segments to stitch");
         }
 
-        // Build the segment video list for Shotstack
-        const segmentVideos = completedJobs.map((j) => ({
-          url: j.videoUrl!,
-          duration: j.duration || 15,
-        }));
+        // Stabilize video URLs: WaveSpeed URLs may expire, so get signed URLs for our stored videos
+        // or re-upload external URLs to our storage for Shotstack to access
+        const segmentVideos: Array<{ url: string; duration: number }> = [];
+        for (const j of completedJobs) {
+          let stableUrl = j.videoUrl!;
+          // If the URL is from our storage (starts with /manus-storage/), get a signed URL
+          if (stableUrl.startsWith("/manus-storage/")) {
+            const key = stableUrl.replace("/manus-storage/", "");
+            stableUrl = await storageGetSignedUrl(key);
+          } else if (!stableUrl.startsWith("http")) {
+            // Relative URL — try to get signed
+            stableUrl = await storageGetSignedUrl(stableUrl);
+          }
+          // If it's an external URL (WaveSpeed), download and re-upload to our storage
+          if (stableUrl.includes("wavespeed") || stableUrl.includes("amazonaws") || stableUrl.includes("cdn")) {
+            try {
+              console.log("[Stitch] Stabilizing external video URL for segment " + j.segmentIndex);
+              const resp = await fetch(stableUrl);
+              if (resp.ok) {
+                const buffer = Buffer.from(await resp.arrayBuffer());
+                const { url: storedUrl } = await storagePut(
+                  "stitch-videos/" + input.briefId + "/seg" + j.segmentIndex + ".mp4",
+                  buffer,
+                  "video/mp4"
+                );
+                // Get a signed URL for the stored video
+                const storedKey = storedUrl.replace("/manus-storage/", "");
+                stableUrl = await storageGetSignedUrl(storedKey);
+              }
+            } catch (err) {
+              console.warn("[Stitch] Failed to stabilize URL for segment " + j.segmentIndex + ":", err);
+              // Fall back to original URL
+            }
+          }
+          segmentVideos.push({ url: stableUrl, duration: j.duration || 15 });
+        }
+
+        // Prepare thumbstopper if provided
+        let thumbstopper: { url: string; duration: number } | undefined;
+        if (input.thumbstopperUrl) {
+          let tsUrl = input.thumbstopperUrl;
+          if (tsUrl.startsWith("/manus-storage/")) {
+            const key = tsUrl.replace("/manus-storage/", "");
+            tsUrl = await storageGetSignedUrl(key);
+          }
+          thumbstopper = { url: tsUrl, duration: input.thumbstopperDuration || 3 };
+        }
 
         // Create the stitch job record
         const stitchJobId = await createStitchJob({
@@ -829,11 +998,13 @@ export const appRouter = router({
           segmentCount: completedJobs.length,
           status: "pending",
           aspectRatio: "9:16",
+          thumbstopperUrl: input.thumbstopperUrl || null,
         });
 
         try {
-          // Build the Shotstack edit JSON and submit
-          const edit = buildStitchEdit(segmentVideos, "9:16");
+          // Build the Shotstack edit JSON and submit (with optional thumbstopper)
+          const edit = buildStitchEdit(segmentVideos, "9:16", thumbstopper);
+          console.log("[Stitch] Submitting to Shotstack with " + segmentVideos.length + " segments" + (thumbstopper ? " + thumbstopper" : ""));
           const renderResponse = await submitShotstackRender(edit);
 
           await updateStitchJob(stitchJobId, {
@@ -952,6 +1123,287 @@ export const appRouter = router({
           segmentCount: job.segmentCount,
           createdAt: job.createdAt,
         };
+      }),
+
+    /** Delete existing stitch job to allow re-stitching after segment regeneration */
+    reset: protectedProcedure
+      .input(z.object({ briefId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        const existingStitch = await getStitchJobByBriefId(input.briefId);
+        if (existingStitch) {
+          await deleteStitchJob(existingStitch.id);
+        }
+
+        return { success: true, message: "Stitch job reset. You can now re-stitch with updated segments." };
+      }),
+  }),
+
+  /** Thumbstopper generation: creates an aggressive callout image for the start of the ad */
+  thumbstopper: router({
+    generate: protectedProcedure
+      .input(
+        z.object({
+          briefId: z.number(),
+          productName: z.string().min(1),
+          adGoal: z.string().min(1),
+          targetAudience: z.string().min(1),
+          customCallout: z.string().optional(),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        // Step 1: Generate the callout text using LLM with belief engineering
+        let calloutText = input.customCallout || "";
+        if (!calloutText) {
+          const llmResponse = await invokeLLM({
+            messages: [
+              {
+                role: "system",
+                content: [
+                  "You are an expert direct-response copywriter. Generate a SINGLE aggressive thumbstopper callout for a video ad.",
+                  "",
+                  "RULES:",
+                  "- Maximum 8 words",
+                  "- Must create instant curiosity or urgency",
+                  "- Use belief engineering: target a blocking belief or promise an outcome",
+                  "- Examples of great callouts:",
+                  "  * 'The Secret Nobody Tells You About [X]'",
+                  "  * 'Stop Doing [Common Mistake] NOW'",
+                  "  * 'I Lost 30lbs Without [Thing They Hate]'",
+                  "  * 'Why [Audience] Are Switching To THIS'",
+                  "  * 'The REAL Reason You Can't [Outcome]'",
+                  "  * 'Wait... THIS Actually Works?!'",
+                  "",
+                  "Return ONLY the callout text, nothing else. No quotes, no explanation.",
+                ].join("\n"),
+              },
+              {
+                role: "user",
+                content: "Product: " + input.productName + "\nGoal: " + input.adGoal + "\nTarget: " + input.targetAudience + "\n\nGenerate ONE aggressive thumbstopper callout.",
+              },
+            ],
+          });
+          calloutText = typeof llmResponse.choices[0]?.message?.content === "string"
+            ? llmResponse.choices[0].message.content.trim().replace(/^"|"$/g, "")
+            : "WATCH THIS";
+        }
+
+        // Step 2: Generate the thumbstopper image
+        const imagePrompt = [
+          "Bold, eye-catching social media ad thumbnail. 9:16 vertical format.",
+          "Dark/moody background with high contrast.",
+          "Large, bold white text overlay reading: \"" + calloutText + "\"",
+          "Text should be centered, impactful, and impossible to miss.",
+          "Style: modern, clean, direct-response advertising aesthetic.",
+          "No people, just bold typography on a dramatic background.",
+          "Colors: dark background with bright accent (red, orange, or yellow) highlighting key words.",
+        ].join(" ");
+
+        try {
+          const { url: imageUrl } = await generateImage({ prompt: imagePrompt });
+
+          if (!imageUrl) {
+            throw new Error("Image generation returned no URL");
+          }
+
+          return { calloutText, imageUrl };
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : "Unknown error";
+          throw new Error("Failed to generate thumbstopper image: " + errMsg);
+        }
+      }),
+  }),
+
+  /** Audio quality control: transcribe video audio and validate against expected dialogue */
+  audioQc: router({
+    check: protectedProcedure
+      .input(
+        z.object({
+          jobId: z.number(),
+          expectedDialogue: z.string().optional(),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const job = await getVideoJobById(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new Error("Video job not found or access denied");
+        }
+
+        if (job.status !== "completed" || !job.videoUrl) {
+          throw new Error("Video must be completed before audio QC");
+        }
+
+        // Get a stable URL for the video
+        let videoUrl = job.videoUrl;
+        if (videoUrl.startsWith("/manus-storage/")) {
+          const key = videoUrl.replace("/manus-storage/", "");
+          videoUrl = await storageGetSignedUrl(key);
+        }
+
+        // Transcribe the video audio
+        const transcription = await transcribeAudio({
+          audioUrl: videoUrl,
+          language: "en",
+          prompt: "Transcribe the spoken dialogue in this UGC video ad.",
+        });
+
+        if ("error" in transcription) {
+          // If transcription fails, mark as skipped (service issue, not audio issue)
+          await updateVideoJob(job.id, {
+            audioQcStatus: "skipped",
+            audioQcTranscript: "Transcription failed: " + transcription.error,
+          });
+          return {
+            status: "skipped" as const,
+            reason: transcription.error,
+            transcript: null,
+          };
+        }
+
+        const transcript = transcription.text;
+
+        // Analyze audio quality using heuristics
+        const issues: string[] = [];
+
+        // Check 1: Very short or empty transcript suggests audio glitch
+        if (!transcript || transcript.trim().length < 10) {
+          issues.push("No intelligible speech detected — possible audio glitch or silence");
+        }
+
+        // Check 2: Repetitive patterns suggest audio loop/glitch
+        if (transcript) {
+          const words = transcript.split(/\s+/);
+          if (words.length > 5) {
+            const firstHalf = words.slice(0, Math.floor(words.length / 2)).join(" ");
+            const secondHalf = words.slice(Math.floor(words.length / 2)).join(" ");
+            if (firstHalf === secondHalf) {
+              issues.push("Audio appears to loop/repeat — likely a generation glitch");
+            }
+          }
+        }
+
+        // Check 3: Segment-level analysis for gaps or anomalies
+        if (transcription.segments && transcription.segments.length > 0) {
+          // Check for large gaps between segments (> 5s suggests audio dropout)
+          for (let i = 1; i < transcription.segments.length; i++) {
+            const gap = transcription.segments[i].start - transcription.segments[i - 1].end;
+            if (gap > 5) {
+              issues.push("Large audio gap detected (" + gap.toFixed(1) + "s) — possible dropout");
+            }
+          }
+
+          // Check for very low confidence segments
+          const lowConfidence = transcription.segments.filter(s => s.avg_logprob < -1.5);
+          if (lowConfidence.length > transcription.segments.length * 0.5) {
+            issues.push("Over 50% of audio has very low transcription confidence — possible distortion");
+          }
+
+          // Check for high no_speech_prob
+          const highNoSpeech = transcription.segments.filter(s => s.no_speech_prob > 0.8);
+          if (highNoSpeech.length > transcription.segments.length * 0.5) {
+            issues.push("Over 50% of segments detected as non-speech — possible audio corruption");
+          }
+        }
+
+        // Check 4: If expected dialogue provided, compare similarity
+        let dialogueMatch = true;
+        if (input.expectedDialogue && transcript) {
+          const expected = input.expectedDialogue.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+          const actual = transcript.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+          // Simple word overlap check
+          const expectedWordsArr = expected.split(/\s+/);
+          const actualWords = new Set(actual.split(/\s+/));
+          const overlap = expectedWordsArr.filter(w => actualWords.has(w)).length;
+          const matchRatio = overlap / expectedWordsArr.length;
+          if (matchRatio < 0.3) {
+            issues.push("Transcribed audio doesn't match expected dialogue (" + Math.round(matchRatio * 100) + "% word overlap)");
+            dialogueMatch = false;
+          }
+        }
+
+        const passed = issues.length === 0;
+        const qcStatus = passed ? "passed" : "failed";
+
+        await updateVideoJob(job.id, {
+          audioQcStatus: qcStatus,
+          audioQcTranscript: transcript,
+        });
+
+        return {
+          status: qcStatus as "passed" | "failed",
+          transcript,
+          issues,
+          dialogueMatch,
+          segmentCount: transcription.segments?.length || 0,
+          duration: transcription.duration,
+        };
+      }),
+
+    /** Batch check all completed segments for a brief */
+    checkAll: protectedProcedure
+      .input(z.object({ briefId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const brief = await getBriefById(input.briefId);
+        if (!brief || brief.userId !== ctx.user.id) {
+          throw new Error("Brief not found or access denied");
+        }
+
+        const jobs = await getVideoJobsByBriefId(input.briefId);
+        const completedJobs = jobs.filter(j => j.status === "completed" && j.videoUrl);
+
+        const results: Array<{ jobId: number; segmentIndex: number; status: string; issues: string[] }> = [];
+
+        for (const job of completedJobs) {
+          let videoUrl = job.videoUrl!;
+          if (videoUrl.startsWith("/manus-storage/")) {
+            const key = videoUrl.replace("/manus-storage/", "");
+            videoUrl = await storageGetSignedUrl(key);
+          }
+
+          const transcription = await transcribeAudio({
+            audioUrl: videoUrl,
+            language: "en",
+          });
+
+          if ("error" in transcription) {
+            await updateVideoJob(job.id, { audioQcStatus: "skipped" });
+            results.push({ jobId: job.id, segmentIndex: job.segmentIndex, status: "skipped", issues: [transcription.error] });
+            continue;
+          }
+
+          const issues: string[] = [];
+          const transcript = transcription.text;
+
+          if (!transcript || transcript.trim().length < 10) {
+            issues.push("No intelligible speech detected");
+          }
+
+          if (transcription.segments) {
+            const highNoSpeech = transcription.segments.filter(s => s.no_speech_prob > 0.8);
+            if (highNoSpeech.length > transcription.segments.length * 0.5) {
+              issues.push("Majority non-speech detected");
+            }
+            const lowConf = transcription.segments.filter(s => s.avg_logprob < -1.5);
+            if (lowConf.length > transcription.segments.length * 0.5) {
+              issues.push("Low transcription confidence");
+            }
+          }
+
+          const qcStatus = issues.length === 0 ? "passed" : "failed";
+          await updateVideoJob(job.id, { audioQcStatus: qcStatus, audioQcTranscript: transcript });
+          results.push({ jobId: job.id, segmentIndex: job.segmentIndex, status: qcStatus, issues });
+        }
+
+        return { results, totalChecked: completedJobs.length, passed: results.filter(r => r.status === "passed").length };
       }),
   }),
 });

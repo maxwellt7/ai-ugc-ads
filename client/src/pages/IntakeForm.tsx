@@ -9,10 +9,11 @@ import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import { useLocation } from "wouter";
 import { useState, useCallback } from "react";
-import { ArrowLeft, ArrowRight, Loader2, Upload, Sparkles, X, FileText, PenTool } from "lucide-react";
+import { ArrowLeft, ArrowRight, Loader2, Upload, Sparkles, X, FileText, PenTool, Wand2, Film, Box, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 type IntakeMode = "description" | "script";
+type AdStyle = "ugc" | "animated" | "direct_response";
 
 interface FormData {
   productName: string;
@@ -27,6 +28,7 @@ interface FormData {
   productImageUrl: string | null;
   imageAnalysis: string | null;
   intakeMode: IntakeMode;
+  adStyle: AdStyle;
 }
 
 const DESCRIPTION_STEPS = [
@@ -48,8 +50,10 @@ const SCRIPT_STEPS = [
 export default function IntakeForm() {
   const { user, isAuthenticated, loading: authLoading } = useAuth();
   const [, navigate] = useLocation();
+  const [adStyle, setAdStyle] = useState<AdStyle | null>(null);
   const [intakeMode, setIntakeMode] = useState<IntakeMode | null>(null);
   const [step, setStep] = useState(1);
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [formData, setFormData] = useState<FormData>({
     productName: "",
     productDescription: "",
@@ -63,6 +67,7 @@ export default function IntakeForm() {
     productImageUrl: null,
     imageAnalysis: null,
     intakeMode: "description",
+    adStyle: "ugc",
   });
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -77,6 +82,7 @@ export default function IntakeForm() {
   const uploadMutation = trpc.brief.uploadImage.useMutation();
   const analyzeMutation = trpc.brief.analyzeImage.useMutation();
   const generateMutation = trpc.brief.generate.useMutation();
+  const generateScriptMutation = trpc.brief.generateScript.useMutation();
 
   const STEPS = intakeMode === "script" ? SCRIPT_STEPS : DESCRIPTION_STEPS;
 
@@ -144,6 +150,33 @@ export default function IntakeForm() {
     toast.success("Suggestion applied");
   }, [updateField]);
 
+  const handleGenerateScript = useCallback(async () => {
+    if (formData.adGoal === "") {
+      toast.error("Please complete the direction step first");
+      return;
+    }
+    setIsGeneratingScript(true);
+    try {
+      const result = await generateScriptMutation.mutateAsync({
+        productName: formData.productName,
+        productDescription: formData.productDescription,
+        targetAudienceAge: formData.targetAudienceAge,
+        targetAudienceGender: formData.targetAudienceGender,
+        targetAudienceLifestyle: formData.targetAudienceLifestyle,
+        adGoal: formData.adGoal,
+        toneVibe: formData.toneVibe,
+        segmentCount: formData.segmentCount,
+        adStyle: formData.adStyle,
+      });
+      updateField("scriptConcept", result.script);
+      toast.success("Script generated using Belief Engineering framework!");
+    } catch {
+      toast.error("Script generation failed. Please try again.");
+    } finally {
+      setIsGeneratingScript(false);
+    }
+  }, [formData, generateScriptMutation, updateField]);
+
   const canProceed = (): boolean => {
     switch (step) {
       case 1:
@@ -185,6 +218,7 @@ export default function IntakeForm() {
         productImageUrl: formData.productImageUrl,
         imageAnalysis: formData.imageAnalysis,
         intakeMode: intakeMode || "description",
+        adStyle: formData.adStyle,
       });
 
       toast.success("Brief generated!");
@@ -207,11 +241,103 @@ export default function IntakeForm() {
     return null;
   }
 
-  // Mode selection screen
+  // Step 0: Ad Style Selection
+  if (!adStyle) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+        <nav className="w-full border-b border-border">
+          <div className="container flex items-center justify-between h-16">
+            <button onClick={() => navigate("/")} className="flex items-center gap-3 hover:opacity-80 transition-opacity">
+              <div className="w-3 h-3 bg-primary" />
+              <span className="font-display text-2xl tracking-wider uppercase">UGC AD DIRECTOR</span>
+            </button>
+            <button
+              onClick={() => navigate("/history")}
+              className="text-muted-foreground hover:text-foreground transition-colors font-sans text-sm uppercase tracking-widest"
+            >
+              History
+            </button>
+          </div>
+        </nav>
+
+        <main className="flex-1 container py-16 max-w-4xl mx-auto">
+          <div className="text-center mb-12">
+            <h1 className="font-display text-5xl md:text-6xl tracking-wider uppercase leading-none mb-4">
+              CHOOSE YOUR <span className="text-primary">AD STYLE</span>
+            </h1>
+            <div className="brutal-divider mt-4 mx-auto max-w-[80px]" />
+            <p className="mt-6 text-muted-foreground font-sans text-sm tracking-wide max-w-lg mx-auto">
+              Select the type of video ad you want to create. Each style generates different visual prompts optimized for that format.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* UGC Ad */}
+            <button
+              onClick={() => {
+                setAdStyle("ugc");
+                setFormData(prev => ({ ...prev, adStyle: "ugc" }));
+              }}
+              className="group border-2 border-border hover:border-primary transition-all p-8 text-left space-y-4"
+            >
+              <div className="w-14 h-14 border border-border group-hover:border-primary group-hover:bg-primary/10 flex items-center justify-center transition-all">
+                <Film className="w-7 h-7 text-muted-foreground group-hover:text-primary transition-colors" />
+              </div>
+              <h3 className="font-display text-2xl tracking-wider uppercase">UGC AD</h3>
+              <p className="font-sans text-sm text-muted-foreground leading-relaxed">
+                Hyper-realistic AI-generated UGC creator talking to camera. iPhone-style footage, natural lighting, authentic feel.
+              </p>
+              <span className="inline-block font-sans text-xs uppercase tracking-widest text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                Most popular →
+              </span>
+            </button>
+
+            {/* Animated Ad */}
+            <button
+              onClick={() => {
+                setAdStyle("animated");
+                setFormData(prev => ({ ...prev, adStyle: "animated" }));
+              }}
+              className="group border-2 border-border hover:border-primary transition-all p-8 text-left space-y-4"
+            >
+              <div className="w-14 h-14 border border-border group-hover:border-primary group-hover:bg-primary/10 flex items-center justify-center transition-all">
+                <Box className="w-7 h-7 text-muted-foreground group-hover:text-primary transition-colors" />
+              </div>
+              <h3 className="font-display text-2xl tracking-wider uppercase">ANIMATED</h3>
+              <p className="font-sans text-sm text-muted-foreground leading-relaxed">
+                3D animated mascot/character. Colorful, expressive, brand-appropriate with stylized environments.
+              </p>
+              <span className="inline-block font-sans text-xs uppercase tracking-widest text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                Eye-catching →
+              </span>
+            </button>
+
+            {/* Direct Response */}
+            <button
+              disabled
+              className="group border-2 border-border/50 p-8 text-left space-y-4 opacity-50 cursor-not-allowed"
+            >
+              <div className="w-14 h-14 border border-border/50 flex items-center justify-center">
+                <Zap className="w-7 h-7 text-muted-foreground/50" />
+              </div>
+              <h3 className="font-display text-2xl tracking-wider uppercase text-muted-foreground/50">DIRECT RESPONSE</h3>
+              <p className="font-sans text-sm text-muted-foreground/50 leading-relaxed">
+                High-conversion direct response format with aggressive hooks, social proof, and urgency.
+              </p>
+              <span className="inline-block font-sans text-xs uppercase tracking-widest text-muted-foreground/30">
+                Coming soon
+              </span>
+            </button>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // Step 1: Mode selection (description vs script)
   if (!intakeMode) {
     return (
       <div className="min-h-screen bg-background text-foreground flex flex-col">
-        {/* Nav */}
         <nav className="w-full border-b border-border">
           <div className="container flex items-center justify-between h-16">
             <button onClick={() => navigate("/")} className="flex items-center gap-3 hover:opacity-80 transition-opacity">
@@ -228,6 +354,20 @@ export default function IntakeForm() {
         </nav>
 
         <main className="flex-1 container py-16 max-w-3xl mx-auto">
+          <div className="mb-6">
+            <button
+              onClick={() => setAdStyle(null)}
+              className="font-sans text-xs text-muted-foreground hover:text-primary uppercase tracking-widest transition-colors"
+            >
+              ← CHANGE AD STYLE
+            </button>
+            <div className="mt-2 inline-block border border-primary/30 bg-primary/5 px-3 py-1">
+              <span className="font-sans text-xs uppercase tracking-widest text-primary">
+                {adStyle === "ugc" ? "UGC Ad" : adStyle === "animated" ? "Animated Ad" : "Direct Response"}
+              </span>
+            </div>
+          </div>
+
           <div className="text-center mb-12">
             <h1 className="font-display text-5xl md:text-6xl tracking-wider uppercase leading-none mb-4">
               HOW DO YOU WANT TO <span className="text-primary">START</span>?
@@ -308,12 +448,18 @@ export default function IntakeForm() {
       <div className="w-full border-b border-border">
         <div className="container py-4">
           <div className="flex items-center justify-between mb-3">
-            <button
-              onClick={() => setIntakeMode(null)}
-              className="font-sans text-xs text-muted-foreground hover:text-primary uppercase tracking-widest transition-colors"
-            >
-              ← {intakeMode === "script" ? "SCRIPT" : "DESCRIPTION"} MODE
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setIntakeMode(null)}
+                className="font-sans text-xs text-muted-foreground hover:text-primary uppercase tracking-widest transition-colors"
+              >
+                ← {intakeMode === "script" ? "SCRIPT" : "DESCRIPTION"} MODE
+              </button>
+              <span className="text-muted-foreground/30">|</span>
+              <span className="font-sans text-xs text-primary/70 uppercase tracking-widest">
+                {adStyle === "ugc" ? "UGC" : adStyle === "animated" ? "ANIMATED" : "DR"}
+              </span>
+            </div>
             <div className="flex items-center gap-4">
               {STEPS.map((s) => (
                 <button
@@ -553,6 +699,38 @@ export default function IntakeForm() {
               )}
             </div>
 
+            {/* AI Script Generation Button */}
+            {intakeMode === "description" && (
+              <div className="border border-primary/30 bg-primary/5 p-4 space-y-3">
+                <div className="flex items-center gap-2 text-primary">
+                  <Wand2 className="w-4 h-4" />
+                  <span className="font-sans text-xs uppercase tracking-widest">AI Script Writer (Belief Engineering)</span>
+                </div>
+                <p className="text-sm text-muted-foreground font-sans">
+                  Don't have a script? Let the AI write one using the Belief Engineering framework — proven direct-response copywriting that moves viewers from skepticism to action.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleGenerateScript}
+                  disabled={isGeneratingScript || formData.adGoal === ""}
+                  className="text-xs uppercase tracking-widest border-primary/30 text-primary hover:bg-primary/10"
+                >
+                  {isGeneratingScript ? (
+                    <>
+                      <Loader2 className="w-3 h-3 mr-2 animate-spin" />
+                      Writing Script...
+                    </>
+                  ) : (
+                    <>
+                      <Wand2 className="w-3 h-3 mr-2" />
+                      Generate Script with AI
+                    </>
+                  )}
+                </Button>
+              </div>
+            )}
+
             {intakeMode === "description" && analysisResult && analysisResult.suggestedAngles.length > 0 && (
               <div className="border border-primary/30 bg-primary/5 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-primary">
@@ -561,7 +739,7 @@ export default function IntakeForm() {
                 </div>
                 <div className="space-y-1">
                   {analysisResult.suggestedAngles.map((angle, i) => (
-                    <p key={i} className="text-sm text-muted-foreground font-sans">• {angle}</p>
+                    <p key={i} className="text-sm text-muted-foreground font-sans">{"\u2022"} {angle}</p>
                   ))}
                 </div>
                 {analysisResult.suggestedUseCases.length > 0 && (
@@ -571,7 +749,7 @@ export default function IntakeForm() {
                     </div>
                     <div className="space-y-1">
                       {analysisResult.suggestedUseCases.map((uc, i) => (
-                        <p key={i} className="text-sm text-muted-foreground font-sans">• {uc}</p>
+                        <p key={i} className="text-sm text-muted-foreground font-sans">{"\u2022"} {uc}</p>
                       ))}
                     </div>
                   </>
@@ -661,13 +839,13 @@ export default function IntakeForm() {
                     <div className="space-y-2">
                       <p className="text-xs text-muted-foreground font-sans uppercase tracking-widest">Suggested Angles:</p>
                       {analysisResult.suggestedAngles.map((a, i) => (
-                        <p key={i} className="text-sm text-foreground font-sans">• {a}</p>
+                        <p key={i} className="text-sm text-foreground font-sans">{"\u2022"} {a}</p>
                       ))}
                     </div>
                     <div className="space-y-2">
                       <p className="text-xs text-muted-foreground font-sans uppercase tracking-widest">Use Cases:</p>
                       {analysisResult.suggestedUseCases.map((u, i) => (
-                        <p key={i} className="text-sm text-foreground font-sans">• {u}</p>
+                        <p key={i} className="text-sm text-foreground font-sans">{"\u2022"} {u}</p>
                       ))}
                     </div>
                     <div>

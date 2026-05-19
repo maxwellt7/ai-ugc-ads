@@ -175,7 +175,8 @@ describe("stitch.create", () => {
         { url: "https://example.com/video-0.mp4", duration: 15 },
         { url: "https://example.com/video-1.mp4", duration: 15 },
       ],
-      "9:16"
+      "9:16",
+      undefined
     );
   });
 
@@ -401,5 +402,50 @@ describe("shotstack.buildStitchEdit", () => {
 
     expect(edit.timeline.tracks[0].clips).toHaveLength(1);
     expect(edit.timeline.tracks[0].clips[0].transition).toBeUndefined();
+  });
+});
+
+describe("stitch.reset", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("deletes existing stitch job and returns success", async () => {
+    const { deleteStitchJob } = await import("./db");
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.stitch.reset({ briefId: 1 });
+
+    expect(result.success).toBe(true);
+    expect(deleteStitchJob).toHaveBeenCalledWith(100);
+  });
+
+  it("succeeds even when no stitch job exists", async () => {
+    const { getStitchJobByBriefId, deleteStitchJob } = await import("./db");
+    (getStitchJobByBriefId as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.stitch.reset({ briefId: 1 });
+
+    expect(result.success).toBe(true);
+    expect(deleteStitchJob).not.toHaveBeenCalled();
+  });
+
+  it("throws when brief does not belong to user", async () => {
+    const { getBriefById } = await import("./db");
+    (getBriefById as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: 1,
+      userId: 999,
+    });
+
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(caller.stitch.reset({ briefId: 1 })).rejects.toThrow(
+      "Brief not found or access denied"
+    );
   });
 });

@@ -163,7 +163,7 @@ export async function getVideoJobById(id: number) {
   return result.length > 0 ? result[0] : null;
 }
 
-export async function updateVideoJob(id: number, data: Partial<Pick<InsertVideoJob, "status" | "wavespeedTaskId" | "videoUrl" | "errorMessage" | "prompt" | "feedback">>) {
+export async function updateVideoJob(id: number, data: Partial<Pick<InsertVideoJob, "status" | "wavespeedTaskId" | "videoUrl" | "errorMessage" | "prompt" | "feedback" | "audioQcStatus" | "audioQcTranscript">>) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
@@ -222,7 +222,7 @@ export async function getStitchJobByBriefId(briefId: number) {
   return result.length > 0 ? result[0] : null;
 }
 
-export async function updateStitchJob(id: number, data: Partial<Pick<InsertStitchJob, "status" | "shotstackRenderId" | "finalVideoUrl" | "errorMessage">>) {
+export async function updateStitchJob(id: number, data: Partial<Pick<InsertStitchJob, "status" | "shotstackRenderId" | "finalVideoUrl" | "errorMessage" | "thumbstopperUrl" | "thumbstopperText">>) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 

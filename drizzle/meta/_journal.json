@@ -43,6 +43,13 @@
       "when": 1779139431854,
       "tag": "0005_early_spectrum",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1779158546211,
+      "tag": "0006_jazzy_tinkerer",
+      "breakpoints": true
     }
   ]
 }

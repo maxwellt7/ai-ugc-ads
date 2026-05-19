@@ -5,11 +5,20 @@ const BASE_URL = ENV.isProduction
   ? "https://api.shotstack.io/edit/v1"
   : "https://api.shotstack.io/edit/stage";
 
+interface ShotstackVideoAsset {
+  type: "video";
+  src: string;
+}
+
+interface ShotstackImageAsset {
+  type: "image";
+  src: string;
+}
+
+type ShotstackAsset = ShotstackVideoAsset | ShotstackImageAsset;
+
 interface ShotstackClip {
-  asset: {
-    type: "video";
-    src: string;
-  };
+  asset: ShotstackAsset;
   start: number;
   length: number;
   transition?: {
@@ -57,16 +66,35 @@ interface ShotstackStatusResponse {
 /**
  * Build a Shotstack edit JSON payload from an array of video segment URLs.
  * Clips are placed sequentially on a single track with fade transitions.
+ * Optionally prepends a thumbstopper image as the first clip.
  */
 export function buildStitchEdit(
   segmentVideos: Array<{ url: string; duration: number }>,
-  aspectRatio: string = "9:16"
+  aspectRatio: string = "9:16",
+  thumbstopper?: { url: string; duration: number }
 ): ShotstackEdit {
   const TRANSITION_DURATION = 0.5;
   let currentStart = 0;
+  const clips: ShotstackClip[] = [];
 
-  const clips: ShotstackClip[] = segmentVideos.map((seg, index) => {
-    const isFirst = index === 0;
+  // Prepend thumbstopper image as first clip if provided
+  if (thumbstopper) {
+    clips.push({
+      asset: {
+        type: "image",
+        src: thumbstopper.url,
+      },
+      start: currentStart,
+      length: thumbstopper.duration,
+      transition: {
+        out: "fade",
+      },
+    });
+    currentStart += thumbstopper.duration - TRANSITION_DURATION;
+  }
+
+  segmentVideos.forEach((seg, index) => {
+    const isFirst = index === 0 && !thumbstopper;
     const isLast = index === segmentVideos.length - 1;
 
     const clip: ShotstackClip = {
@@ -79,7 +107,8 @@ export function buildStitchEdit(
     };
 
     // Add transitions between clips
-    if (segmentVideos.length > 1) {
+    const totalClips = segmentVideos.length + (thumbstopper ? 1 : 0);
+    if (totalClips > 1) {
       clip.transition = {};
       if (!isFirst) {
         clip.transition.in = "fade";
@@ -94,7 +123,7 @@ export function buildStitchEdit(
       currentStart += seg.duration - TRANSITION_DURATION;
     }
 
-    return clip;
+    clips.push(clip);
   });
 
   return {

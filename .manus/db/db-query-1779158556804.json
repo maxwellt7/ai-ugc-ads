@@ -1,0 +1,9 @@
+{
+  "query": "ALTER TABLE `briefs` ADD `adStyle` enum('ugc','animated','direct_response') DEFAULT 'ugc' NOT NULL;\nALTER TABLE `stitch_jobs` ADD `thumbstopperUrl` text;\nALTER TABLE `stitch_jobs` ADD `thumbstopperText` text;\nALTER TABLE `video_jobs` ADD `audioQcStatus` enum('pending','passed','failed','skipped') DEFAULT 'pending';\nALTER TABLE `video_jobs` ADD `audioQcTranscript` text;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway05.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3kHsu6sGTcUzFnN.a47c12d768d5 --database geo45KSNjCpQ6XLUgKF4xW --execute ALTER TABLE `briefs` ADD `adStyle` enum('ugc','animated','direct_response') DEFAULT 'ugc' NOT NULL;\nALTER TABLE `stitch_jobs` ADD `thumbstopperUrl` text;\nALTER TABLE `stitch_jobs` ADD `thumbstopperText` text;\nALTER TABLE `video_jobs` ADD `audioQcStatus` enum('pending','passed','failed','skipped') DEFAULT 'pending';\nALTER TABLE `video_jobs` ADD `audioQcTranscript` text;",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 1269
+}

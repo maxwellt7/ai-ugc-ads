@@ -76,3 +76,21 @@
 - [x] Frontend: referenceImages auto-passed to video.generate, video.generateAll, and video.regenerate when creator image is set
 - [x] Backend: buildUserPrompt adds script-specific conversion instructions when intakeMode=script (preserve dialogue, add visual direction)
 - [x] Tests: 58 tests passing across 6 test files (22 brief, 18 video, 13 stitch, 2 WaveSpeed, 2 Shotstack, 1 auth)
+
+## New Features (Round 4)
+- [x] Fix stitching bug: video URL stabilization — re-upload WaveSpeed URLs to S3 before passing to Shotstack (prevents expiration)
+- [x] Audio quality control: transcription-based validation (audioQc.check, audioQc.checkAll) with glitch detection, silence detection, repetition detection, dialogue matching, and low-confidence flagging
+- [x] Thumbstopper generation: LLM generates aggressive callout text using belief engineering, AI image generation creates compelling 9:16 start frame
+- [x] Thumbstopper stitching: prepend thumbstopper as first clip (3s image asset) before segment videos in final stitch
+- [x] Ad style selection: UGC Ad / Animated Ad (3D mascot) / Direct Response Ad (coming soon) at start of intake
+- [x] Belief engineering script generation: brief.generateScript route uses full belief engineering framework (hook types, body structure, CTA patterns)
+- [x] Animated ad system prompt: different Seedance prompts for 3D mascot style vs UGC style
+- [x] Re-stitch: stitch.reset route deletes old stitch job, UI shows RE-STITCH button after completion
+- [x] Bug fix: regeneration prompt was leaking 'Seedance' into ad dialogue (product name substitution)
+- [x] Bug fix: add NO TEXT OVERLAYS rule to system prompt and regeneration prompt to prevent AI from generating text/captions in video
+- [x] Frontend: Audio QC section with batch check + per-segment check buttons, results display with transcripts
+- [x] Frontend: Thumbstopper section with custom callout input, AI generation, preview, and auto-include in stitch
+- [x] Frontend: Re-stitch button on completed/failed final ad section
+- [x] Frontend: Ad style selection (UGC/Animated/Direct Response) with visual cards at intake start
+- [x] Frontend: Script generation option in intake when user has no script
+- [x] Tests: 61 tests passing across 6 test files (22 brief, 18 video, 16 stitch, 2 WaveSpeed, 2 Shotstack, 1 auth)
