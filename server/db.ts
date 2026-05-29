@@ -8,6 +8,11 @@ let _db: ReturnType<typeof drizzle> | null = null;
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
+      if (ENV.databaseProvider !== "mysql") {
+        console.warn(
+          `[Database] DATABASE_PROVIDER=${ENV.databaseProvider} configured. Current runtime remains mysql-compatible during phased migration.`
+        );
+      }
       _db = drizzle(process.env.DATABASE_URL);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
@@ -18,8 +23,8 @@ export async function getDb() {
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) {
-    throw new Error("User openId is required for upsert");
+  if (!user.openId && !user.externalAuthId) {
+    throw new Error("Either openId or externalAuthId is required for upsert");
   }
 
   const db = await getDb();
@@ -30,11 +35,17 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 
   try {
     const values: InsertUser = {
-      openId: user.openId,
+      openId: user.openId ?? user.externalAuthId ?? "legacy-" + crypto.randomUUID(),
     };
     const updateSet: Record<string, unknown> = {};
 
-    const textFields = ["name", "email", "loginMethod"] as const;
+    const textFields = [
+      "name",
+      "email",
+      "loginMethod",
+      "externalAuthProvider",
+      "externalAuthId",
+    ] as const;
     type TextField = (typeof textFields)[number];
 
     const assignNullable = (field: TextField) => {
@@ -51,6 +62,11 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       values.lastSignedIn = user.lastSignedIn;
       updateSet.lastSignedIn = user.lastSignedIn;
     }
+    if (user.openId !== undefined) {
+      values.openId = user.openId;
+      updateSet.openId = user.openId;
+    }
+
     if (user.role !== undefined) {
       values.role = user.role;
       updateSet.role = user.role;
@@ -84,6 +100,30 @@ export async function getUserByOpenId(openId: string) {
   }
 
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function getUserByExternalAuth(
+  externalAuthProvider: string,
+  externalAuthId: string
+) {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot get user by external auth: database not available");
+    return undefined;
+  }
+
+  const result = await db
+    .select()
+    .from(users)
+    .where(
+      and(
+        eq(users.externalAuthProvider, externalAuthProvider),
+        eq(users.externalAuthId, externalAuthId)
+      )
+    )
+    .limit(1);
 
   return result.length > 0 ? result[0] : undefined;
 }
@@ -170,6 +210,31 @@ export async function updateVideoJob(id: number, data: Partial<Pick<InsertVideoJ
   await db.update(videoJobs).set(data).where(eq(videoJobs.id, id));
 }
 
+export async function getVideoJobByProviderTaskId(taskId: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db
+    .select()
+    .from(videoJobs)
+    .where(eq(videoJobs.wavespeedTaskId, taskId))
+    .limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getVideoJobByIdempotencyKey(userId: number, idempotencyKey: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db
+    .select()
+    .from(videoJobs)
+    .where(
+      and(eq(videoJobs.userId, userId), eq(videoJobs.idempotencyKey, idempotencyKey))
+    )
+    .orderBy(desc(videoJobs.createdAt))
+    .limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
 export async function getVideoJobByBriefAndSegment(briefId: number, segmentIndex: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
@@ -227,6 +292,34 @@ export async function updateStitchJob(id: number, data: Partial<Pick<InsertStitc
   if (!db) throw new Error("Database not available");
 
   await db.update(stitchJobs).set(data).where(eq(stitchJobs.id, id));
+}
+
+export async function getStitchJobByProviderRenderId(renderId: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db
+    .select()
+    .from(stitchJobs)
+    .where(eq(stitchJobs.shotstackRenderId, renderId))
+    .limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getStitchJobByIdempotencyKey(
+  userId: number,
+  idempotencyKey: string
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db
+    .select()
+    .from(stitchJobs)
+    .where(
+      and(eq(stitchJobs.userId, userId), eq(stitchJobs.idempotencyKey, idempotencyKey))
+    )
+    .orderBy(desc(stitchJobs.createdAt))
+    .limit(1);
+  return result.length > 0 ? result[0] : null;
 }
 
 /** Delete a stitch job so a fresh one can be created */

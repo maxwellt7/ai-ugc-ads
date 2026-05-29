@@ -116,6 +116,7 @@ vi.mock("./_core/notification", () => ({
 // Mock the storage module
 vi.mock("./storage", () => ({
   storagePut: vi.fn().mockResolvedValue({ key: "test-key", url: "/manus-storage/test-key" }),
+  storageGetSignedUrl: vi.fn().mockResolvedValue("https://signed.example.com/test-key"),
 }));
 
 describe("brief.generate", () => {

@@ -1,8 +1,12 @@
-// Preconfigured storage helpers for Manus WebDev templates
-// Uploads via Forge Server presigned URL to S3 (PUT direct).
-// Downloads return /manus-storage/{key} paths served via 307 redirect.
-
 import { ENV } from "./_core/env";
+import { withProviderTelemetry } from "./services/providerTelemetry";
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl as getAwsSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 function getForgeConfig() {
   const forgeUrl = ENV.forgeApiUrl;
@@ -17,6 +21,42 @@ function getForgeConfig() {
   return { forgeUrl: forgeUrl.replace(/\/+$/, ""), forgeKey };
 }
 
+function getS3Config() {
+  if (
+    !ENV.s3Bucket ||
+    !ENV.s3AccessKeyId ||
+    !ENV.s3SecretAccessKey ||
+    !ENV.s3Endpoint
+  ) {
+    throw new Error(
+      "S3 config missing: set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY"
+    );
+  }
+  return {
+    endpoint: ENV.s3Endpoint,
+    bucket: ENV.s3Bucket,
+    region: ENV.s3Region,
+    accessKeyId: ENV.s3AccessKeyId,
+    secretAccessKey: ENV.s3SecretAccessKey,
+  };
+}
+
+let _s3Client: S3Client | null = null;
+function getS3Client() {
+  if (_s3Client) return _s3Client;
+  const cfg = getS3Config();
+  _s3Client = new S3Client({
+    endpoint: cfg.endpoint,
+    region: cfg.region,
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId: cfg.accessKeyId,
+      secretAccessKey: cfg.secretAccessKey,
+    },
+  });
+  return _s3Client;
+}
+
 function normalizeKey(relKey: string): string {
   return relKey.replace(/^\/+/, "");
 }
@@ -28,7 +68,7 @@ function appendHashSuffix(relKey: string): string {
   return `${relKey.slice(0, lastDot)}_${hash}${relKey.slice(lastDot)}`;
 }
 
-export async function storagePut(
+async function forgePut(
   relKey: string,
   data: Buffer | Uint8Array | string,
   contentType = "application/octet-stream",
@@ -71,12 +111,37 @@ export async function storagePut(
   return { key, url: `/manus-storage/${key}` };
 }
 
+async function s3Put(
+  relKey: string,
+  data: Buffer | Uint8Array | string,
+  contentType = "application/octet-stream"
+): Promise<{ key: string; url: string }> {
+  const cfg = getS3Config();
+  const client = getS3Client();
+  const key = appendHashSuffix(normalizeKey(relKey));
+  const body = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: cfg.bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    })
+  );
+
+  return {
+    key,
+    url: `/manus-storage/${key}`,
+  };
+}
+
 export async function storageGet(relKey: string): Promise<{ key: string; url: string }> {
   const key = normalizeKey(relKey);
   return { key, url: `/manus-storage/${key}` };
 }
 
-export async function storageGetSignedUrl(relKey: string): Promise<string> {
+async function forgeGetSignedUrl(relKey: string): Promise<string> {
   const { forgeUrl, forgeKey } = getForgeConfig();
   const key = normalizeKey(relKey);
 
@@ -94,4 +159,89 @@ export async function storageGetSignedUrl(relKey: string): Promise<string> {
 
   const { url } = (await resp.json()) as { url: string };
   return url;
+}
+
+async function s3GetSignedUrl(relKey: string): Promise<string> {
+  const cfg = getS3Config();
+  const client = getS3Client();
+  const key = normalizeKey(relKey);
+  const signed = await getAwsSignedUrl(
+    client,
+    new GetObjectCommand({
+      Bucket: cfg.bucket,
+      Key: key,
+    }),
+    { expiresIn: 3600 }
+  );
+  return signed;
+}
+
+async function verifyKeyReadableInS3(key: string) {
+  const cfg = getS3Config();
+  const client = getS3Client();
+  await client.send(
+    new HeadObjectCommand({
+      Bucket: cfg.bucket,
+      Key: key,
+    })
+  );
+}
+
+export async function storagePut(
+  relKey: string,
+  data: Buffer | Uint8Array | string,
+  contentType = "application/octet-stream"
+): Promise<{ key: string; url: string }> {
+  const provider = ENV.storageProvider.toLowerCase();
+  return withProviderTelemetry(
+    "storage",
+    provider,
+    "put",
+    { relKey },
+    async () => {
+      const preferred = provider === "s3" || provider === "r2" ? "s3" : "forge";
+      const primary =
+        preferred === "s3"
+          ? await s3Put(relKey, data, contentType)
+          : await forgePut(relKey, data, contentType);
+
+      if (ENV.storageDualWrite) {
+        try {
+          if (preferred === "s3") {
+            await forgePut(relKey, data, contentType);
+          } else {
+            await s3Put(relKey, data, contentType);
+          }
+        } catch (error) {
+          console.warn("[Storage] dual write failed:", error);
+        }
+      }
+
+      return primary;
+    }
+  );
+}
+
+export async function storageGetSignedUrl(relKey: string): Promise<string> {
+  const provider = ENV.storageProvider.toLowerCase();
+  return withProviderTelemetry(
+    "storage",
+    provider,
+    "presign_get",
+    { relKey },
+    async () => {
+      const preferred = provider === "s3" || provider === "r2" ? "s3" : "forge";
+      if (preferred === "s3") {
+        if (ENV.storageDualReadVerify) {
+          try {
+            await verifyKeyReadableInS3(relKey);
+          } catch (error) {
+            console.warn("[Storage] dual read verification failed:", error);
+          }
+        }
+        return s3GetSignedUrl(relKey);
+      }
+      return forgeGetSignedUrl(relKey);
+    }
+  );
 }

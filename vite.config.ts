@@ -4,7 +4,6 @@ import react from "@vitejs/plugin-react";
 import fs from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin, type ViteDevServer } from "vite";
-import { vitePluginManusRuntime } from "vite-plugin-manus-runtime";
 
 // =============================================================================
 // Manus Debug Collector - Vite Plugin
@@ -70,7 +69,7 @@ function writeToLogFile(source: LogSource, entries: unknown[]) {
 
 /**
  * Vite plugin to collect browser debug logs
- * - POST /__manus__/logs: Browser sends logs, written directly to files
+ * - POST /__runtime__/logs: Browser sends logs, written directly to files
  * - Files: browserConsole.log, networkRequests.log, sessionReplay.log
  * - Auto-trimmed when exceeding 1MB (keeps newest entries)
  */
@@ -98,8 +97,8 @@ function vitePluginManusDebugCollector(): Plugin {
     },
 
     configureServer(server: ViteDevServer) {
-      // POST /__manus__/logs: Browser sends logs (written directly to files)
-      server.middlewares.use("/__manus__/logs", (req, res, next) => {
+      // POST /__runtime__/logs: Browser sends logs (written directly to files)
+      server.middlewares.use("/__runtime__/logs", (req, res, next) => {
         if (req.method !== "POST") {
           return next();
         }
@@ -150,7 +149,7 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
-const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
+const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusDebugCollector()];
 
 export default defineConfig({
   plugins,
@@ -171,11 +170,6 @@ export default defineConfig({
   server: {
     host: true,
     allowedHosts: [
-      ".manuspre.computer",
-      ".manus.computer",
-      ".manus-asia.computer",
-      ".manuscomputer.ai",
-      ".manusvm.computer",
       "localhost",
       "127.0.0.1",
     ],

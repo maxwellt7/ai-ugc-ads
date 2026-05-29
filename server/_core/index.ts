@@ -10,6 +10,13 @@ import { COOKIE_NAME } from "../../shared/const";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import {
+  getStitchJobByProviderRenderId,
+  getVideoJobByProviderTaskId,
+  updateStitchJob,
+  updateVideoJob,
+} from "../db";
+import { ENV } from "./env";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -38,6 +45,95 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
+  app.post("/api/webhooks/wavespeed", async (req, res) => {
+    if (!ENV.webhooksSharedSecret) {
+      res.status(503).json({ error: "Webhooks not configured" });
+      return;
+    }
+    if (req.headers["x-webhook-secret"] !== ENV.webhooksSharedSecret) {
+      res.status(401).json({ error: "Unauthorized webhook call" });
+      return;
+    }
+
+    const body = req.body as {
+      taskId?: string;
+      status?: string;
+      outputUrl?: string;
+      error?: string;
+    };
+    if (!body.taskId || !body.status) {
+      res.status(400).json({ error: "taskId and status are required" });
+      return;
+    }
+
+    const job = await getVideoJobByProviderTaskId(body.taskId);
+    if (!job) {
+      res.status(404).json({ error: "Video job not found" });
+      return;
+    }
+
+    if (body.status === "completed") {
+      await updateVideoJob(job.id, {
+        status: "completed",
+        videoUrl: body.outputUrl || null,
+        errorMessage: null,
+      });
+    } else if (body.status === "failed") {
+      await updateVideoJob(job.id, {
+        status: "failed",
+        errorMessage: body.error || "WaveSpeed webhook failure",
+      });
+    } else {
+      await updateVideoJob(job.id, { status: "processing" });
+    }
+
+    res.json({ ok: true });
+  });
+
+  app.post("/api/webhooks/shotstack", async (req, res) => {
+    if (!ENV.webhooksSharedSecret) {
+      res.status(503).json({ error: "Webhooks not configured" });
+      return;
+    }
+    if (req.headers["x-webhook-secret"] !== ENV.webhooksSharedSecret) {
+      res.status(401).json({ error: "Unauthorized webhook call" });
+      return;
+    }
+
+    const body = req.body as {
+      renderId?: string;
+      status?: "queued" | "fetching" | "rendering" | "saving" | "done" | "failed";
+      outputUrl?: string;
+      error?: string;
+    };
+    if (!body.renderId || !body.status) {
+      res.status(400).json({ error: "renderId and status are required" });
+      return;
+    }
+
+    const job = await getStitchJobByProviderRenderId(body.renderId);
+    if (!job) {
+      res.status(404).json({ error: "Stitch job not found" });
+      return;
+    }
+
+    if (body.status === "done") {
+      await updateStitchJob(job.id, {
+        status: "done",
+        finalVideoUrl: body.outputUrl || null,
+        errorMessage: null,
+      });
+    } else if (body.status === "failed") {
+      await updateStitchJob(job.id, {
+        status: "failed",
+        errorMessage: body.error || "Shotstack webhook failure",
+      });
+    } else {
+      await updateStitchJob(job.id, { status: body.status });
+    }
+
+    res.json({ ok: true });
+  });
   // Simple cookie-clearing endpoint for stale sessions
   app.get("/api/clear-session", (req, res) => {
     const cookieOptions = getSessionCookieOptions(req);

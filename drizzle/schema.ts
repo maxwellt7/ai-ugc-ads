@@ -1,16 +1,36 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, json, bigint } from "drizzle-orm/mysql-core";
+import {
+  int,
+  mysqlEnum,
+  mysqlTable,
+  text,
+  timestamp,
+  varchar,
+  json,
+  uniqueIndex,
+} from "drizzle-orm/mysql-core";
 
-export const users = mysqlTable("users", {
-  id: int("id").autoincrement().primaryKey(),
-  openId: varchar("openId", { length: 64 }).notNull().unique(),
-  name: text("name"),
-  email: varchar("email", { length: 320 }),
-  loginMethod: varchar("loginMethod", { length: 64 }),
-  role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-  lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
-});
+export const users = mysqlTable(
+  "users",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    openId: varchar("openId", { length: 64 }).notNull().unique(),
+    externalAuthProvider: varchar("externalAuthProvider", { length: 32 }),
+    externalAuthId: varchar("externalAuthId", { length: 191 }),
+    name: text("name"),
+    email: varchar("email", { length: 320 }),
+    loginMethod: varchar("loginMethod", { length: 64 }),
+    role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+    lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
+  },
+  (table) => ({
+    externalProviderIdIdx: uniqueIndex("users_external_provider_id_idx").on(
+      table.externalAuthProvider,
+      table.externalAuthId
+    ),
+  })
+);
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
@@ -55,6 +75,7 @@ export const videoJobs = mysqlTable("video_jobs", {
   resolution: varchar("resolution", { length: 10 }).default("720p").notNull(),
   duration: int("duration").default(15).notNull(),
   feedback: text("feedback"),
+  idempotencyKey: varchar("idempotencyKey", { length: 128 }),
   audioQcStatus: mysqlEnum("audioQcStatus", ["pending", "passed", "failed", "skipped"]).default("pending"),
   audioQcTranscript: text("audioQcTranscript"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -75,6 +96,7 @@ export const stitchJobs = mysqlTable("stitch_jobs", {
   segmentCount: int("segmentCount").notNull(),
   thumbstopperUrl: text("thumbstopperUrl"),
   thumbstopperText: text("thumbstopperText"),
+  idempotencyKey: varchar("idempotencyKey", { length: 128 }),
   aspectRatio: varchar("aspectRatio", { length: 20 }).default("9:16").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

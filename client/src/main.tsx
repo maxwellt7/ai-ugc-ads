@@ -43,9 +43,20 @@ const trpcClient = trpc.createClient({
       url: "/api/trpc",
       transformer: superjson,
       fetch(input, init) {
+        const authTokenStorageKey =
+          import.meta.env.VITE_AUTH_TOKEN_STORAGE_KEY || "auth-token";
+        const authToken =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(authTokenStorageKey)
+            : null;
+        const headers = new Headers(init?.headers || {});
+        if (authToken) {
+          headers.set("Authorization", `Bearer ${authToken}`);
+        }
         return globalThis.fetch(input, {
           ...(init ?? {}),
           credentials: "include",
+          headers,
         });
       },
     }),

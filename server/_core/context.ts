@@ -1,8 +1,8 @@
 import type { CreateExpressContextOptions } from "@trpc/server/adapters/express";
 import type { User } from "../../drizzle/schema";
-import { sdk } from "./sdk";
 import { COOKIE_NAME } from "../../shared/const";
 import { getSessionCookieOptions } from "./cookies";
+import { services } from "../services/runtimeServices";
 
 export type TrpcContext = {
   req: CreateExpressContextOptions["req"];
@@ -16,7 +16,7 @@ export async function createContext(
   let user: User | null = null;
 
   try {
-    user = await sdk.authenticateRequest(opts.req);
+    user = await services.auth.authenticateRequest(opts.req);
   } catch (error) {
     // If there's a cookie but it failed verification, clear it so the browser
     // stops sending a stale/invalid token (e.g. from a different project).

@@ -2,21 +2,36 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
-import { invokeLLM } from "./_core/llm";
 import { notifyOwner } from "./_core/notification";
 import {
   createBrief, getBriefsByUserId, getBriefById, updateBrief,
   createVideoJob, getVideoJobsByBriefId, getVideoJobById, updateVideoJob,
   getVideoJobByBriefAndSegment, deleteVideoJob,
   createStitchJob, getStitchJobById, getStitchJobByBriefId, updateStitchJob, deleteStitchJob,
-  getVideoSummaryByBriefIds, getStitchSummaryByBriefIds,
+  getVideoSummaryByBriefIds, getStitchSummaryByBriefIds, getVideoJobByIdempotencyKey, getStitchJobByIdempotencyKey,
 } from "./db";
-import { submitVideoTask, getVideoTaskResult } from "./wavespeed";
-import { buildStitchEdit, submitShotstackRender, getShotstackRenderStatus } from "./shotstack";
-import { storagePut, storageGetSignedUrl } from "./storage";
+import { buildStitchEdit } from "./shotstack";
 import { generateImage } from "./_core/imageGeneration";
 import { transcribeAudio } from "./_core/voiceTranscription";
 import { z } from "zod";
+import { services } from "./services/runtimeServices";
+import { ENV } from "./_core/env";
+
+async function persistExternalMediaUrl(
+  sourceUrl: string,
+  destinationKey: string,
+  contentType: string
+) {
+  const response = await fetch(sourceUrl);
+  if (!response.ok) {
+    throw new Error(
+      `Failed to download external media: ${response.status} ${response.statusText}`
+    );
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const stored = await services.storage.put(destinationKey, buffer, contentType);
+  return stored.url;
+}
 
 const SEEDANCE_SYSTEM_PROMPT = [
   "You are the Seedance 2.0 UGC Ad Director. You create hyper-realistic AI UGC video ad prompts.",
@@ -255,7 +270,7 @@ export const appRouter = router({
           adStyle: input.adStyle || "ugc",
         });
 
-        const llmResponse = await invokeLLM({
+        const llmResponse = await services.llm.invoke({
           messages: [
             { role: "system", content: SEEDANCE_SYSTEM_PROMPT },
             { role: "user", content: userPrompt },
@@ -340,7 +355,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ input }) => {
-        const llmResponse = await invokeLLM({
+        const llmResponse = await services.llm.invoke({
           messages: [
             {
               role: "system",
@@ -398,7 +413,7 @@ export const appRouter = router({
       .mutation(async ({ input, ctx }) => {
         const buffer = Buffer.from(input.fileBase64, "base64");
         const key = "briefs/" + ctx.user.id + "/" + Date.now() + "-" + input.fileName;
-        const { url } = await storagePut(key, buffer, input.contentType);
+        const { url } = await services.storage.put(key, buffer, input.contentType);
         return { url };
       }),
 
@@ -536,7 +551,7 @@ export const appRouter = router({
           "Make the hook AGGRESSIVE and scroll-stopping. Use belief engineering to move the viewer from skepticism to action.",
         ].join("\n");
 
-        const llmResponse = await invokeLLM({
+        const llmResponse = await services.llm.invoke({
           messages: [
             { role: "system", content: beliefPrompt },
             { role: "user", content: userMsg },
@@ -578,9 +593,24 @@ export const appRouter = router({
           segmentName: z.string().optional(),
           referenceImages: z.array(z.string()).optional(),
           duration: z.number().min(4).max(15).optional(),
+          idempotencyKey: z.string().min(1).max(128).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
+        if (input.idempotencyKey) {
+          const existingByKey = await getVideoJobByIdempotencyKey(
+            ctx.user.id,
+            input.idempotencyKey
+          );
+          if (existingByKey) {
+            return {
+              jobId: existingByKey.id,
+              status: existingByKey.status,
+              message: "Video generation already processed for idempotency key",
+            };
+          }
+        }
+
         // Check if a job already exists for this segment
         const existing = await getVideoJobByBriefAndSegment(input.briefId, input.segmentIndex);
         if (existing && (existing.status === "created" || existing.status === "processing")) {
@@ -610,12 +640,13 @@ export const appRouter = router({
           aspectRatio: "9:16",
           resolution: "720p",
           duration: dur,
+          idempotencyKey: input.idempotencyKey || null,
         });
 
         // Submit to WaveSpeed API
         try {
           console.log("[WaveSpeed] Submitting task: duration=" + dur + ", segmentIndex=" + input.segmentIndex + ", briefId=" + input.briefId);
-          const result = await submitVideoTask({
+          const result = await services.video.submit({
             prompt: input.prompt,
             aspectRatio: "9:16",
             resolution: "720p",
@@ -654,6 +685,7 @@ export const appRouter = router({
           ),
           referenceImages: z.array(z.string()).optional(),
           duration: z.number().min(4).max(15).optional(),
+          idempotencyKeyPrefix: z.string().min(1).max(120).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
@@ -687,11 +719,14 @@ export const appRouter = router({
             aspectRatio: "9:16",
             resolution: "720p",
             duration: dur,
+            idempotencyKey: input.idempotencyKeyPrefix
+              ? `${input.idempotencyKeyPrefix}:${seg.segmentIndex}`
+              : null,
           });
 
           try {
             console.log("[WaveSpeed] Submitting bulk task: duration=" + dur + ", segmentIndex=" + seg.segmentIndex);
-            const result = await submitVideoTask({
+            const result = await services.video.submit({
               prompt: seg.prompt,
               aspectRatio: "9:16",
               resolution: "720p",
@@ -728,9 +763,25 @@ export const appRouter = router({
           feedback: z.string().min(1),
           referenceImages: z.array(z.string()).optional(),
           duration: z.number().min(4).max(15).optional(),
+          idempotencyKey: z.string().min(1).max(128).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
+        if (input.idempotencyKey) {
+          const existingByKey = await getVideoJobByIdempotencyKey(
+            ctx.user.id,
+            input.idempotencyKey
+          );
+          if (existingByKey) {
+            return {
+              jobId: existingByKey.id,
+              status: existingByKey.status,
+              revisedPrompt: existingByKey.prompt,
+              wavespeedTaskId: existingByKey.wavespeedTaskId,
+            };
+          }
+        }
+
         const brief = await getBriefById(input.briefId);
         if (!brief || brief.userId !== ctx.user.id) {
           throw new Error("Brief not found or access denied");
@@ -738,7 +789,7 @@ export const appRouter = router({
 
         // Use LLM to revise the prompt based on feedback
         const productName = brief.productName || "the product";
-        const revisionResponse = await invokeLLM({
+        const revisionResponse = await services.llm.invoke({
           messages: [
             {
               role: "system",
@@ -788,12 +839,13 @@ export const appRouter = router({
           aspectRatio: "9:16",
           resolution: "720p",
           duration: dur,
+          idempotencyKey: input.idempotencyKey || null,
         });
 
         // Submit to WaveSpeed
         try {
           console.log("[WaveSpeed] Regenerating segment " + input.segmentIndex + " with feedback, duration=" + dur);
-          const result = await submitVideoTask({
+          const result = await services.video.submit({
             prompt: revisedPrompt,
             aspectRatio: "9:16",
             resolution: "720p",
@@ -841,14 +893,30 @@ export const appRouter = router({
         // Poll WaveSpeed API for status update
         if (job.wavespeedTaskId) {
           try {
-            const result = await getVideoTaskResult(job.wavespeedTaskId);
+            const result = await services.video.getResult(job.wavespeedTaskId);
             const newStatus = result.data.status === "completed" ? "completed" as const
               : result.data.status === "failed" ? "failed" as const
               : "processing" as const;
 
             const updateData: Record<string, string> = { status: newStatus };
             if (newStatus === "completed" && result.data.outputs?.length > 0) {
-              updateData.videoUrl = result.data.outputs[0];
+              let outputUrl = result.data.outputs[0];
+              if (
+                ENV.durableMediaCopy &&
+                outputUrl.startsWith("http") &&
+                !outputUrl.startsWith("/manus-storage/")
+              ) {
+                try {
+                  outputUrl = await persistExternalMediaUrl(
+                    outputUrl,
+                    `video-jobs/${job.briefId}/segment-${job.segmentIndex}.mp4`,
+                    "video/mp4"
+                  );
+                } catch (error) {
+                  console.warn("[Video] durable copy failed, using provider URL", error);
+                }
+              }
+              updateData.videoUrl = outputUrl;
             }
             if (newStatus === "failed" && result.data.error) {
               updateData.errorMessage = result.data.error;
@@ -859,7 +927,8 @@ export const appRouter = router({
             return {
               id: job.id,
               status: newStatus,
-              videoUrl: newStatus === "completed" ? result.data.outputs?.[0] || null : null,
+              videoUrl:
+                newStatus === "completed" ? updateData.videoUrl || null : null,
               errorMessage: newStatus === "failed" ? result.data.error || null : null,
               segmentIndex: job.segmentIndex,
               prompt: job.prompt,
@@ -919,9 +988,25 @@ export const appRouter = router({
           briefId: z.number(),
           thumbstopperUrl: z.string().optional(),
           thumbstopperDuration: z.number().min(1).max(5).optional(),
+          idempotencyKey: z.string().min(1).max(128).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
+        if (input.idempotencyKey) {
+          const existingByKey = await getStitchJobByIdempotencyKey(
+            ctx.user.id,
+            input.idempotencyKey
+          );
+          if (existingByKey) {
+            return {
+              stitchJobId: existingByKey.id,
+              shotstackRenderId: existingByKey.shotstackRenderId,
+              status: existingByKey.status,
+              segmentCount: existingByKey.segmentCount,
+            };
+          }
+        }
+
         const brief = await getBriefById(input.briefId);
         if (!brief || brief.userId !== ctx.user.id) {
           throw new Error("Brief not found or access denied");
@@ -951,10 +1036,10 @@ export const appRouter = router({
           // If the URL is from our storage (starts with /manus-storage/), get a signed URL
           if (stableUrl.startsWith("/manus-storage/")) {
             const key = stableUrl.replace("/manus-storage/", "");
-            stableUrl = await storageGetSignedUrl(key);
+            stableUrl = await services.storage.getSignedUrl(key);
           } else if (!stableUrl.startsWith("http")) {
             // Relative URL — try to get signed
-            stableUrl = await storageGetSignedUrl(stableUrl);
+            stableUrl = await services.storage.getSignedUrl(stableUrl);
           }
           // If it's an external URL (WaveSpeed), download and re-upload to our storage
           if (stableUrl.includes("wavespeed") || stableUrl.includes("amazonaws") || stableUrl.includes("cdn")) {
@@ -963,14 +1048,14 @@ export const appRouter = router({
               const resp = await fetch(stableUrl);
               if (resp.ok) {
                 const buffer = Buffer.from(await resp.arrayBuffer());
-                const { url: storedUrl } = await storagePut(
+                const { url: storedUrl } = await services.storage.put(
                   "stitch-videos/" + input.briefId + "/seg" + j.segmentIndex + ".mp4",
                   buffer,
                   "video/mp4"
                 );
                 // Get a signed URL for the stored video
                 const storedKey = storedUrl.replace("/manus-storage/", "");
-                stableUrl = await storageGetSignedUrl(storedKey);
+                stableUrl = await services.storage.getSignedUrl(storedKey);
               }
             } catch (err) {
               console.warn("[Stitch] Failed to stabilize URL for segment " + j.segmentIndex + ":", err);
@@ -986,7 +1071,7 @@ export const appRouter = router({
           let tsUrl = input.thumbstopperUrl;
           if (tsUrl.startsWith("/manus-storage/")) {
             const key = tsUrl.replace("/manus-storage/", "");
-            tsUrl = await storageGetSignedUrl(key);
+            tsUrl = await services.storage.getSignedUrl(key);
           }
           thumbstopper = { url: tsUrl, duration: input.thumbstopperDuration || 3 };
         }
@@ -999,13 +1084,14 @@ export const appRouter = router({
           status: "pending",
           aspectRatio: "9:16",
           thumbstopperUrl: input.thumbstopperUrl || null,
+          idempotencyKey: input.idempotencyKey || null,
         });
 
         try {
           // Build the Shotstack edit JSON and submit (with optional thumbstopper)
           const edit = buildStitchEdit(segmentVideos, "9:16", thumbstopper);
           console.log("[Stitch] Submitting to Shotstack with " + segmentVideos.length + " segments" + (thumbstopper ? " + thumbstopper" : ""));
-          const renderResponse = await submitShotstackRender(edit);
+          const renderResponse = await services.stitch.submit(edit);
 
           await updateStitchJob(stitchJobId, {
             shotstackRenderId: renderResponse.response.id,
@@ -1049,18 +1135,30 @@ export const appRouter = router({
         // Poll Shotstack API for status update
         if (job.shotstackRenderId) {
           try {
-            const result = await getShotstackRenderStatus(job.shotstackRenderId);
+            const result = await services.stitch.getResult(job.shotstackRenderId);
             const ssStatus = result.response.status;
 
             if (ssStatus === "done") {
+              let finalVideoUrl = result.response.url || null;
+              if (finalVideoUrl && ENV.durableMediaCopy && finalVideoUrl.startsWith("http")) {
+                try {
+                  finalVideoUrl = await persistExternalMediaUrl(
+                    finalVideoUrl,
+                    `stitch-jobs/${job.briefId}/final-${job.id}.mp4`,
+                    "video/mp4"
+                  );
+                } catch (error) {
+                  console.warn("[Stitch] durable copy failed, using provider URL", error);
+                }
+              }
               await updateStitchJob(job.id, {
                 status: "done",
-                finalVideoUrl: result.response.url || null,
+                finalVideoUrl,
               });
               return {
                 id: job.id,
                 status: "done" as const,
-                finalVideoUrl: result.response.url || null,
+                finalVideoUrl,
                 errorMessage: null,
               };
             } else if (ssStatus === "failed") {
@@ -1164,7 +1262,7 @@ export const appRouter = router({
         // Step 1: Generate the callout text using LLM with belief engineering
         let calloutText = input.customCallout || "";
         if (!calloutText) {
-          const llmResponse = await invokeLLM({
+          const llmResponse = await services.llm.invoke({
             messages: [
               {
                 role: "system",
@@ -1246,7 +1344,7 @@ export const appRouter = router({
         let videoUrl = job.videoUrl;
         if (videoUrl.startsWith("/manus-storage/")) {
           const key = videoUrl.replace("/manus-storage/", "");
-          videoUrl = await storageGetSignedUrl(key);
+          videoUrl = await services.storage.getSignedUrl(key);
         }
 
         // Transcribe the video audio
@@ -1366,7 +1464,7 @@ export const appRouter = router({
           let videoUrl = job.videoUrl!;
           if (videoUrl.startsWith("/manus-storage/")) {
             const key = videoUrl.replace("/manus-storage/", "");
-            videoUrl = await storageGetSignedUrl(key);
+            videoUrl = await services.storage.getSignedUrl(key);
           }
 
           const transcription = await transcribeAudio({

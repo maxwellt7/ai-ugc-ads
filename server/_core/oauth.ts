@@ -3,6 +3,7 @@ import type { Express, Request, Response } from "express";
 import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import { sdk } from "./sdk";
+import { ENV } from "./env";
 
 function getQueryParam(req: Request, key: string): string | undefined {
   const value = req.query[key];
@@ -10,7 +11,42 @@ function getQueryParam(req: Request, key: string): string | undefined {
 }
 
 export function registerOAuthRoutes(app: Express) {
+  app.post("/api/auth/custom-login", async (req: Request, res: Response) => {
+    if (ENV.authProvider.toLowerCase() !== "custom") {
+      res.status(404).json({ error: "custom auth is disabled" });
+      return;
+    }
+
+    const body = req.body as { openId?: string };
+    if (!body?.openId) {
+      res.status(400).json({ error: "openId is required" });
+      return;
+    }
+
+    const user = await db.getUserByOpenId(body.openId);
+    if (!user) {
+      res.status(404).json({ error: "user not found" });
+      return;
+    }
+
+    const sessionToken = await sdk.createSessionToken(user.openId, {
+      name: user.name || "",
+      expiresInMs: ONE_YEAR_MS,
+    });
+    const cookieOptions = getSessionCookieOptions(req);
+    res.cookie(COOKIE_NAME, sessionToken, {
+      ...cookieOptions,
+      maxAge: ONE_YEAR_MS,
+    });
+    res.json({ success: true });
+  });
+
   app.get("/api/oauth/callback", async (req: Request, res: Response) => {
+    if (ENV.authProvider.toLowerCase() !== "manus") {
+      res.status(404).json({ error: "oauth callback is disabled" });
+      return;
+    }
+
     const code = getQueryParam(req, "code");
     const state = getQueryParam(req, "state");
 
