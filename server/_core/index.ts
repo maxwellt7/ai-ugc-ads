@@ -17,6 +17,7 @@ import {
   updateVideoJob,
 } from "../db";
 import { ENV } from "./env";
+import type { Express } from "express";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -37,14 +38,7 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
-async function startServer() {
-  const app = express();
-  const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
-  registerStorageProxy(app);
-  registerOAuthRoutes(app);
+function registerWebhookRoutes(app: Express) {
   app.post("/api/webhooks/wavespeed", async (req, res) => {
     if (!ENV.webhooksSharedSecret) {
       res.status(503).json({ error: "Webhooks not configured" });
@@ -134,6 +128,12 @@ async function startServer() {
 
     res.json({ ok: true });
   });
+}
+
+function registerAppRoutes(app: Express) {
+  registerStorageProxy(app);
+  registerOAuthRoutes(app);
+  registerWebhookRoutes(app);
   // Simple cookie-clearing endpoint for stale sessions
   app.get("/api/clear-session", (req, res) => {
     const cookieOptions = getSessionCookieOptions(req);
@@ -148,13 +148,36 @@ async function startServer() {
       createContext,
     })
   );
+}
+
+export async function createApp(options?: {
+  server?: ReturnType<typeof createServer>;
+  enableVite?: boolean;
+}) {
+  const app = express();
+  // Configure body parser with larger size limit for file uploads
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  registerAppRoutes(app);
+
+  const shouldUseVite =
+    (options?.enableVite ?? true) && process.env.NODE_ENV === "development";
   // development mode uses Vite, production mode uses static files
-  if (process.env.NODE_ENV === "development") {
-    await setupVite(app, server);
+  if (shouldUseVite) {
+    if (!options?.server) {
+      throw new Error("createApp requires a server instance when enableVite is true");
+    }
+    await setupVite(app, options.server);
   } else {
     serveStatic(app);
   }
+  return app;
+}
 
+async function startServer() {
+  const server = createServer();
+  const app = await createApp({ server, enableVite: true });
+  server.on("request", app);
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);
 
@@ -167,4 +190,6 @@ async function startServer() {
   });
 }
 
-startServer().catch(console.error);
+if (process.env.VERCEL !== "1") {
+  startServer().catch(console.error);
+}

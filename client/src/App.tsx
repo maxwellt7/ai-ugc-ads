@@ -8,6 +8,8 @@ import Home from "./pages/Home";
 import IntakeForm from "./pages/IntakeForm";
 import BriefResult from "./pages/BriefResult";
 import History from "./pages/History";
+import SignInPage from "./pages/SignInPage";
+import SignUpPage from "./pages/SignUpPage";
 
 function Router() {
   return (
@@ -16,6 +18,8 @@ function Router() {
       <Route path={"/create"} component={IntakeForm} />
       <Route path={"/brief/:id"} component={BriefResult} />
       <Route path={"/history"} component={History} />
+      <Route path={"/sign-in"} component={SignInPage} />
+      <Route path={"/sign-up"} component={SignUpPage} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>

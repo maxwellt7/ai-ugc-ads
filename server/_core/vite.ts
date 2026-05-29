@@ -48,10 +48,15 @@ export async function setupVite(app: Express, server: Server) {
 }
 
 export function serveStatic(app: Express) {
+  const buildDistPath = path.resolve(process.cwd(), "dist", "public");
+  const bundledDistPath = path.resolve(import.meta.dirname, "public");
+  const devDistPath = path.resolve(import.meta.dirname, "../..", "dist", "public");
   const distPath =
     process.env.NODE_ENV === "development"
-      ? path.resolve(import.meta.dirname, "../..", "dist", "public")
-      : path.resolve(import.meta.dirname, "public");
+      ? devDistPath
+      : fs.existsSync(buildDistPath)
+      ? buildDistPath
+      : bundledDistPath;
   if (!fs.existsSync(distPath)) {
     console.error(
       `Could not find the build directory: ${distPath}, make sure to build the client first`
